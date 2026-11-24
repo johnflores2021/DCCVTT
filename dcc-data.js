@@ -7,10 +7,11 @@ const CHANNEL_NAME = 'dcc_vtt_sync_channel_v9';
 const DEFAULT_SHEETS_WEBHOOK_URL = '';
 
 const COMBAT_PHASES = [
-  { id: 0, short: 'P1: Mobs', label: 'Phase 1: Mob Action' },
-  { id: 1, short: 'P2: React', label: 'Phase 2: Crawler Reaction' },
-  { id: 2, short: 'P3: Move/Cast', label: 'Phase 3: Mob Move & Spell' },
-  { id: 3, short: 'P4: Crawlers', label: 'Phase 4: Crawler Action' }
+  { id: 0, short: '1: Declare', label: 'Step 1: Mob Action Declaration' },
+  { id: 1, short: '2: React', label: 'Step 2: Crawler Reaction Phase' },
+  { id: 2, short: '3: Mobs', label: 'Step 3: Mob Action Resolution' },
+  { id: 3, short: '4: Crawlers', label: 'Step 4: Crawler Action Phase' },
+  { id: 4, short: '5: Clean Up', label: 'Step 5: Clean Up (End of Round)' }
 ];
 
 const DEFAULT_BESTIARY = [
@@ -122,6 +123,72 @@ const DEFAULT_BESTIARY = [
 ];
 
 const DEFAULT_OBJECT_TEMPLATES = [
+  {
+    id: 'obj_tpl_spike_pit',
+    name: 'Spike Pit Trap',
+    category: 'Hazard / Trap',
+    iconSymbol: '🕳️',
+    color: '#ef4444',
+    lightRadiusFt: 0,
+    trapConfig: {
+      isTrap: true,
+      armed: true,
+      detected: false,
+      detectDcBase: 12,
+      disarmDcBase: 13,
+      hitDcBase: 12,
+      damageExpr: '1d6 + F',
+      damageType: 'Piercing',
+      applyDebuff: 'Prone',
+      aoeFt: 5,
+      notes: 'Concealed pit lined with sharpened stakes. Evade check mitigates damage; failure may apply Prone.'
+    },
+    notes: 'Trap: Concealed spike pit (1d6+F Piercing, +Prone). Detectable & disarmable.'
+  },
+  {
+    id: 'obj_tpl_dart_wall',
+    name: 'Poison Dart Slit Trap',
+    category: 'Hazard / Trap',
+    iconSymbol: '🏹',
+    color: '#f97316',
+    lightRadiusFt: 0,
+    trapConfig: {
+      isTrap: true,
+      armed: true,
+      detected: false,
+      detectDcBase: 13,
+      disarmDcBase: 12,
+      hitDcBase: 13,
+      damageExpr: '1d4 + F',
+      damageType: 'Poison',
+      applyDebuff: 'Poisoned',
+      aoeFt: 0,
+      notes: 'Spring-loaded wall darts tipped with dungeon venom. Target can Evade (d20 + Evade vs Flat Hit DC).'
+    },
+    notes: 'Trap: Wall-mounted poison darts (1d4+F Poison, +Poisoned). Evadeable reaction.'
+  },
+  {
+    id: 'obj_tpl_flame_rune',
+    name: 'Cinder Rune Trap',
+    category: 'Hazard / Trap',
+    iconSymbol: '🔥',
+    color: '#fbbf24',
+    lightRadiusFt: 10,
+    trapConfig: {
+      isTrap: true,
+      armed: true,
+      detected: false,
+      detectDcBase: 14,
+      disarmDcBase: 14,
+      hitDcBase: 13,
+      damageExpr: '1d8 + F',
+      damageType: 'Fire',
+      applyDebuff: 'Burned',
+      aoeFt: 10,
+      notes: 'Arcane rune that erupts in a 10ft burst when stepped on, applying Burned.'
+    },
+    notes: 'Trap: 10ft Fire burst rune (1d8+F Fire, +Burned). Evade halves AoE or avoids.'
+  },
   { id: 'obj_tpl_sarcophagus', name: 'Stone Sarcophagus', category: 'Cover / Obstacle', iconSymbol: '⚰️', color: '#94a3b8', lightRadiusFt: 0, notes: 'Unmarked ash-stone tomb. Provides Heavy Cover (+2 DR); can be pried open.' },
   { id: 'obj_tpl_reel', name: 'Industrial Cable Reel', category: 'Cover / Obstacle', iconSymbol: '🪵', color: '#f59e0b', lightRadiusFt: 0, notes: 'Heavy wooden spool wrapped in wiring. Heavy Cover (+2 DR); wire can be harvested for tripwires.' },
   { id: 'obj_tpl_pit', name: 'Collapsed Grave Pit', category: 'Hazard / Trap', iconSymbol: '🕳️', color: '#ef4444', lightRadiusFt: 0, notes: 'DC 12 Dex / Reflex save to avoid falling into open crypt fissure.' },
@@ -131,12 +198,222 @@ const DEFAULT_OBJECT_TEMPLATES = [
 ];
 
 const DEFAULT_DEBUFFS_LIST = [
-  { id: 'deb_fatigued', name: 'Fatigued', category: 'Mental / Physical', duration: 'Until Rest / Cleansed', color: '#a855f7', description: 'Thoughts confused and feet sluggish; suffers Disadvantage on physical checks and loses 10ft of movement.' },
-  { id: 'deb_prone', name: 'Prone', category: 'Physical / Movement', duration: 'Until standing (costs 10ft Move)', color: '#f59e0b', description: 'Target is knocked flat on the ground. Melee attacks have Advantage; Ranged attacks have Disadvantage.' },
-  { id: 'deb_stunned', name: 'Stunned', category: 'Mental / Incapacitating', duration: '1 Round', color: '#ef4444', description: 'Target cannot take Actions, Reactions, or 10ft Steps.' },
-  { id: 'deb_burning', name: 'Burning', category: 'Elemental / DoT', duration: 'Until extinguished', color: '#f97316', description: 'Target takes 1d4 Fire damage at the start of each round.' },
-  { id: 'deb_bleeding', name: 'Bleeding', category: 'Physical / DoT', duration: 'Until healed', color: '#dc2626', description: 'Target loses 1 Health Pip at the end of any round in which they move more than 10ft.' },
-  { id: 'deb_slowed', name: 'Slowed', category: 'Movement / Magic', duration: '2 Rounds', color: '#38bdf8', description: 'Target base Move speed is halved and loses free 10ft step.' }
+  {
+    id: 'deb_blinded',
+    name: 'Blinded',
+    category: 'Sensory / Vision',
+    duration: 'Until the end of the next round',
+    color: '#64748b',
+    description: 'Roll all Skill Checks that require sight with Disadvantage.'
+  },
+  {
+    id: 'deb_blood_trail',
+    name: 'Blood Trail',
+    category: 'Physical / DoT',
+    duration: 'Until cured with a bandage or a First Aid Skill Check',
+    color: '#dc2626',
+    description: 'You take 1d6+F damage at the end of each round. Stackable.'
+  },
+  {
+    id: 'deb_burned',
+    name: 'Burned',
+    category: 'Elemental / DoT',
+    duration: 'Until the end of combat or 5 minutes (Action: Dex Stat Check to extinguish)',
+    color: '#f97316',
+    description: 'You take 1d10+F Fire damage at the end of each round.'
+  },
+  {
+    id: 'deb_drowning',
+    name: 'Drowning',
+    category: 'Environmental / DoT',
+    duration: 'Until your head is above water',
+    color: '#0284c7',
+    description: 'You take 1d6+F damage at the end of each round.'
+  },
+  {
+    id: 'deb_dying',
+    name: 'Dying',
+    category: 'Critical / Health Bar',
+    duration: 'Until you die or heal at least 1 HB slot',
+    color: '#e11d48',
+    description: 'You are at 0% HB. Your Con Mod is how many rounds you have before you die (subtract 1 at end of each round, or 1 each time a Dying Crawler would take damage from any source).'
+  },
+  {
+    id: 'deb_enraged',
+    name: 'Enraged',
+    category: 'Mental / Fury',
+    duration: 'Until the end of 2 rounds or 20 seconds',
+    color: '#ef4444',
+    description: 'You are in a state of extreme uncontrolled fury. You may only perform Attack and Move Actions.'
+  },
+  {
+    id: 'deb_fatigued',
+    name: 'Fatigued',
+    category: 'Physical / Exhaustion',
+    duration: 'Until the end of a long rest',
+    color: '#a855f7',
+    description: 'You have a −1 penalty on all Checks and your Move is halved. Stackable.'
+  },
+  {
+    id: 'deb_held',
+    name: 'Held',
+    category: 'Physical / Control',
+    duration: 'Until released or escaped (Str-Opposed Escape Artist Skill Check; Unopposed if not physically held)',
+    color: '#f59e0b',
+    description: 'You are actively being held. You can’t use Move Actions or take a Step but may still twist your body to Evade. Attacks against a Held foe are made with Advantage.'
+  },
+  {
+    id: 'deb_long_term_major_injury',
+    name: 'Long-Term Major Injury',
+    category: 'Injury / Severe',
+    duration: 'Until the end of a full day of rest',
+    color: '#991b1b',
+    description: 'You take a −5 penalty to all Checks.'
+  },
+  {
+    id: 'deb_long_term_minor_injury',
+    name: 'Long-Term Minor Injury',
+    category: 'Injury / Moderate',
+    duration: 'Until the end of a long rest',
+    color: '#b45309',
+    description: 'You take a −2 penalty to all Checks.'
+  },
+  {
+    id: 'deb_major_injury',
+    name: 'Major Injury',
+    category: 'Injury / Severe',
+    duration: 'Until the end of a long rest',
+    color: '#dc2626',
+    description: 'You take a −5 penalty to all Checks. Gaining a Major Injury a second time changes it to a Long-Term Major Injury.'
+  },
+  {
+    id: 'deb_minor_injury',
+    name: 'Minor Injury',
+    category: 'Injury / Moderate',
+    duration: 'Until the end of a short rest',
+    color: '#d97706',
+    description: 'You take a −2 penalty to all Checks. Gaining a Minor Injury a second time changes it to a Long-Term Minor Injury.'
+  },
+  {
+    id: 'deb_muted',
+    name: 'Muted',
+    category: 'Sensory / Magic',
+    duration: 'Until the end of the combat or 5 minutes',
+    color: '#8b5cf6',
+    description: 'You can’t speak or cast Spells.'
+  },
+  {
+    id: 'deb_poisoned',
+    name: 'Poisoned',
+    category: 'Toxin / DoT',
+    duration: 'Until treated with an antidote',
+    color: '#84cc16',
+    description: 'You take 1d8+F Poison damage at the end of each round. Stackable.'
+  },
+  {
+    id: 'deb_paralyzed',
+    name: 'Paralyzed',
+    category: 'Incapacitating',
+    duration: 'Until the end of the next round',
+    color: '#ec4899',
+    description: 'You can’t take any Actions.'
+  },
+  {
+    id: 'deb_queasy',
+    name: 'Queasy',
+    category: 'Nausea / Action',
+    duration: 'Once you forfeit that Action',
+    color: '#a3e635',
+    description: 'You lose your next Action.'
+  },
+  {
+    id: 'deb_sepsis',
+    name: 'Sepsis',
+    category: 'Infection / DoT',
+    duration: 'As Staggered, and the damage continues until you’re healed',
+    color: '#65a30d',
+    description: 'You’re Staggered and take 1d10+F Poison damage at the end of each round.'
+  },
+  {
+    id: 'deb_shit_faced',
+    name: 'Shit-Faced',
+    category: 'Intoxication',
+    duration: 'Until the end of 1 hour',
+    color: '#c084fc',
+    description: 'You make all your Checks with Disadvantage.'
+  },
+  {
+    id: 'deb_shocked',
+    name: 'Shocked',
+    category: 'Condition / Action',
+    duration: 'At the end of the next Action you take',
+    color: '#facc15',
+    description: 'The next Action you take can’t be a Move, and if it is an Attack, its Check is made with Disadvantage. You can’t take a 10ft Step with your next Action.'
+  },
+  {
+    id: 'deb_sore_as_shit',
+    name: 'Sore as Shit',
+    category: 'Physical / Penalty',
+    duration: 'Until the end of the combat or 5 minutes',
+    color: '#fb923c',
+    description: 'You suffer a −1 penalty to all rolls.'
+  },
+  {
+    id: 'deb_staggered',
+    name: 'Staggered',
+    category: 'Movement / Step',
+    duration: 'Once you make a Check',
+    color: '#f59e0b',
+    description: 'You can’t take 10ft Steps.'
+  },
+  {
+    id: 'deb_stiff_legs',
+    name: 'Stiff Legs',
+    category: 'Movement / Check',
+    duration: 'Until the end of the next round, or you take at least 1 HB slot damage',
+    color: '#38bdf8',
+    description: 'You gain Disadvantage on your next Check.'
+  },
+  {
+    id: 'deb_stunned',
+    name: 'Stunned',
+    category: 'Incapacitating',
+    duration: 'Until the end of the next round',
+    color: '#ef4444',
+    description: 'If your next Action requires a roll, it’s made with Disadvantage.'
+  },
+  {
+    id: 'deb_take_down',
+    name: 'Take Down',
+    category: 'Physical / Prone',
+    duration: 'Use your 10ft Step to stand',
+    color: '#fb7185',
+    description: 'You fall prone. While prone, all Attacks made against you are made with Advantage.'
+  },
+  {
+    id: 'deb_terrified',
+    name: 'Terrified',
+    category: 'Fear / Combat',
+    duration: 'Until the end of the combat or 5 minutes',
+    color: '#c026d3',
+    description: 'You can’t take Move Actions or 10ft Steps. You make all Attacks with Disadvantage.'
+  },
+  {
+    id: 'deb_the_taint',
+    name: 'The Taint',
+    category: 'Curse / Healing',
+    duration: 'Until cured',
+    color: '#7e22ce',
+    description: 'You can’t be healed.'
+  },
+  {
+    id: 'deb_woozy',
+    name: 'Woozy',
+    category: 'Disorientation',
+    duration: 'Until the end of the next round',
+    color: '#2dd4bf',
+    description: 'You can’t add your Dex Mod to Attack or Evade Checks.'
+  }
 ];
 
 const DEFAULT_BUFFS_LIST = [
@@ -150,6 +427,50 @@ const DEFAULT_BUFFS_LIST = [
 ];
 
 const DEFAULT_SKILLS_LIST = [
+  {
+    id: 'sk_trap_detection',
+    name: 'Trap Detection',
+    skillGroup: 'utility',
+    tags: 'Utility, Exploration, Perception, Trap',
+    range: '30 feet',
+    effectType: 'buff',
+    diceFormula: '',
+    hitStat: 'Int',
+    applyBuff: '',
+    applyDebuff: '',
+    baseDamage: '',
+    rank1Effect: 'Spot hidden traps, tripwires, and pressure plates within 30ft using d20 + Rank + Int Mod against the trap’s Detection DC (10 + Floor + Tier). Reveals hidden traps on the map & HUD.',
+    description: 'Train your eye and ear for mechanical triggers, pressure seams, dart slits, and arcane wards before stepping into danger.',
+    vfxType: 'ring',
+    vfxColor: '#38bdf8',
+    upgrades: [
+      'Rank 5: +5ft detection radius and spot traps even in dim light without penalty.',
+      'Rank 10: Automatically notice adjacent traps within 10ft before triggering if not Blinded.',
+      'Rank 15: Pinpoint trap trigger & disable weakness (+3 to Disarm Trap checks against detected traps).'
+    ]
+  },
+  {
+    id: 'sk_disarm_trap',
+    name: 'Disarm Trap',
+    skillGroup: 'utility',
+    tags: 'Utility, Exploration, Dexterity, Trap',
+    range: '5 feet',
+    effectType: 'buff',
+    diceFormula: '',
+    hitStat: 'Dex',
+    applyBuff: '',
+    applyDebuff: '',
+    baseDamage: '',
+    rank1Effect: 'Attempt to disarm an adjacent trap (<=5ft) with d20 + Rank + Dex Mod vs Trap Disarm DC. Failure by 5+ or Nat 1 can spring the trap; Success disarms it safely!',
+    description: 'Jam gears, wedge pressure plates, and sever tripwires carefully so the party can pass safely.',
+    vfxType: 'spark',
+    vfxColor: '#10b981',
+    upgrades: [
+      'Rank 5: Safe failure—failed Disarm checks do not accidentally spring the trap unless you roll a Natural 1.',
+      'Rank 10: Disarmed traps can be salvaged for parts/components.',
+      'Rank 15: Quick-disarm adjacent traps cleanly and gain Advantage on Disarm checks.'
+    ]
+  },
   {
         "id": "sk_improvised_weapons",
         "name": "Improvised Weapons",
@@ -710,7 +1031,7 @@ const DEFAULT_SKILLS_LIST = [
         "range": "100 feet",
         "effectType": "attack",
         "diceFormula": "1d6 + Str",
-        "hitStat": "Str",
+        "hitStat": "Dex",
         "applyBuff": "",
         "applyDebuff": "",
         "lightRadiusFt": 0,
@@ -733,7 +1054,7 @@ const DEFAULT_SKILLS_LIST = [
         "range": "50 feet",
         "effectType": "attack",
         "diceFormula": "1d8",
-        "hitStat": "",
+        "hitStat": "Dex",
         "applyBuff": "",
         "applyDebuff": "",
         "lightRadiusFt": 0,
@@ -756,7 +1077,7 @@ const DEFAULT_SKILLS_LIST = [
         "range": "150 feet",
         "effectType": "attack",
         "diceFormula": "1d8",
-        "hitStat": "",
+        "hitStat": "Dex",
         "applyBuff": "",
         "applyDebuff": "",
         "lightRadiusFt": 0,
@@ -779,7 +1100,7 @@ const DEFAULT_SKILLS_LIST = [
         "range": "40 feet",
         "effectType": "attack",
         "diceFormula": "1d8 + Str",
-        "hitStat": "Str",
+        "hitStat": "Dex",
         "applyBuff": "",
         "applyDebuff": "",
         "lightRadiusFt": 0,
@@ -802,7 +1123,7 @@ const DEFAULT_SKILLS_LIST = [
         "range": "30 feet",
         "effectType": "attack",
         "diceFormula": "1d10",
-        "hitStat": "",
+        "hitStat": "Dex",
         "applyBuff": "",
         "applyDebuff": "",
         "lightRadiusFt": 0,
@@ -825,7 +1146,7 @@ const DEFAULT_SKILLS_LIST = [
         "range": "30 feet",
         "effectType": "attack",
         "diceFormula": "1d4 + Str",
-        "hitStat": "Str",
+        "hitStat": "Dex",
         "applyBuff": "",
         "applyDebuff": "",
         "lightRadiusFt": 0,
@@ -848,7 +1169,7 @@ const DEFAULT_SKILLS_LIST = [
         "range": "30 feet",
         "effectType": "attack",
         "diceFormula": "1d2 + Str",
-        "hitStat": "Str",
+        "hitStat": "Dex",
         "applyBuff": "",
         "applyDebuff": "",
         "lightRadiusFt": 0,

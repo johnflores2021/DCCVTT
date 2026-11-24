@@ -128,6 +128,47 @@
       background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
       animation: shimmerSweep 1.6s ease-in-out 1;
     }
+    .vtt-tour-highlight {
+      position: relative;
+      z-index: 45 !important;
+      outline: 2px solid #34d399;
+      box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.28), 0 0 24px rgba(52, 211, 153, 0.45);
+      border-radius: 12px;
+    }
+    input.grind-hours-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 10px;
+      border-radius: 9999px;
+      outline: none;
+      transition: background 0.15s ease, box-shadow 0.2s ease;
+    }
+    input.grind-hours-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 9999px;
+      background: var(--thumb-bg, #10b981);
+      border: 3px solid #f8fafc;
+      box-shadow: 0 0 12px var(--thumb-glow, rgba(16, 185, 129, 0.75));
+      cursor: grab;
+      transition: transform 0.12s ease, background 0.18s ease, box-shadow 0.18s ease;
+    }
+    input.grind-hours-slider::-webkit-slider-thumb:active {
+      cursor: grabbing;
+      transform: scale(1.14);
+    }
+    input.grind-hours-slider::-moz-range-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 9999px;
+      background: var(--thumb-bg, #10b981);
+      border: 3px solid #f8fafc;
+      box-shadow: 0 0 12px var(--thumb-glow, rgba(16, 185, 129, 0.75));
+      cursor: grab;
+      transition: transform 0.12s ease, background 0.18s ease, box-shadow 0.18s ease;
+    }
     .roll-spark-particle {
       position: absolute;
       pointer-events: none;
@@ -141,125 +182,112 @@
   <!-- ===================================================================== -->
   <!-- TOP COMMAND & COMBAT PHASE BAR                                        -->
   <!-- ===================================================================== -->
-  <header class="bg-dungeon-900/95 border-b border-slate-800/90 px-3 py-2 flex flex-wrap items-center justify-between gap-2 z-30 shrink-0">
-    <!-- Left: Brand, Mode Badge & Multi-Scene Selector -->
-    <div class="flex items-center gap-2.5 flex-wrap">
+    <header class="bg-dungeon-900/95 border-b border-slate-800/90 px-3 py-2 flex flex-wrap items-center justify-between gap-2 z-30 shrink-0">
+    <!-- Left: Brand, Mode Badge & Scene Switcher -->
+    <div class="flex items-center gap-2 flex-wrap">
       <div class="flex items-center gap-2">
         <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-red-600 flex items-center justify-center shadow-lg shadow-amber-500/20 font-display font-black text-slate-950 text-sm">
           DCC
         </div>
         <div class="leading-tight">
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-1.5">
             <span class="font-display font-bold text-sm tracking-wide text-amber-400">SYSTEM AI // VTT</span>
             <span id="windowModeBadge" class="px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
               GM + PLAYER VIEW
             </span>
           </div>
-          <p class="text-[11px] text-slate-400 hidden sm:block">Raycast Occlusion • Dynamic Lighting • Action Economy</p>
+          <p class="text-[11px] text-slate-400 hidden xl:block">Raycast Occlusion • Dynamic Lighting • Action Economy</p>
         </div>
       </div>
 
-      <!-- Scene / Floor Switcher & Inline Renamer -->
-      <div id="sceneControlsGroup" class="flex items-center gap-1.5 bg-dungeon-950 border border-slate-800 rounded-xl p-1">
-        <span class="text-[10px] font-mono uppercase text-slate-500 pl-2">Map:</span>
-        <select id="mapSceneSelect" onchange="switchMapScene(this.value)" class="bg-transparent text-xs font-semibold text-slate-200 focus:outline-none pr-1 cursor-pointer max-w-[190px] truncate"></select>
-        <input id="inlineSceneRenameInput" type="text" onkeydown="handleInlineSceneRenameKey(event)" placeholder="Map Name..." class="hidden bg-dungeon-900 border border-amber-400/70 rounded-lg px-2 py-0.5 text-xs font-semibold text-amber-100 focus:outline-none w-44" />
-        <button id="saveSceneRenameBtn" onclick="commitInlineSceneRename()" title="Save Map Name" class="hidden px-2 py-0.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold">
-          ✓
-        </button>
-        <button id="renameSceneBtn" onclick="startInlineSceneRename()" title="Rename Current Map Scene" class="px-1.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition">
-          ✏️
-        </button>
-        <button id="deleteSceneBtn" onclick="deleteActiveMapScene()" title="Delete Current Map Scene" class="px-1.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-300 text-[11px] font-semibold transition">
-          🗑️
-        </button>
-        <button onclick="createNewMapScene()" title="Create New Map Scene" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-[11px] font-semibold transition">
-          + Scene
-        </button>
+      <!-- Scene / Floor Switcher -->
+      <div id="sceneControlsGroup" class="flex items-center gap-1 bg-dungeon-950 border border-slate-800 rounded-xl p-1">
+        <span class="text-[10px] font-mono uppercase text-slate-500 pl-1.5">Map:</span>
+        <select id="mapSceneSelect" onchange="switchMapScene(this.value)" class="bg-transparent text-xs font-semibold text-slate-200 focus:outline-none pr-1 cursor-pointer max-w-[165px] truncate"></select>
+        <input id="inlineSceneRenameInput" type="text" onkeydown="handleInlineSceneRenameKey(event)" placeholder="Map Name..." class="hidden bg-dungeon-900 border border-amber-400/70 rounded-lg px-2 py-0.5 text-xs font-semibold text-amber-100 focus:outline-none w-36" />
+        <button id="saveSceneRenameBtn" onclick="commitInlineSceneRename()" title="Save Map Name" class="hidden px-2 py-0.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold">✓</button>
+        <button id="renameSceneBtn" onclick="startInlineSceneRename()" title="Rename Current Map Scene" class="px-1.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition">✏️</button>
+        <button id="deleteSceneBtn" onclick="deleteActiveMapScene()" title="Delete Current Map Scene" class="px-1.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-300 text-[11px] font-semibold transition">🗑️</button>
+        <button onclick="createNewMapScene()" title="Create New Map Scene" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-[11px] font-semibold transition">+ Scene</button>
       </div>
     </div>
 
-    <!-- Center: Round & 4-Phase Combat Tracker -->
+    <!-- Center: Floor, Round, Phase & Collapse Clock -->
     <div class="flex items-center gap-1.5 bg-dungeon-950/90 border border-slate-800 rounded-xl p-1 overflow-x-auto max-w-full">
-      <div class="flex items-center gap-1 px-2 border-r border-slate-800" title="Current Dungeon Floor (added to Monster Evade)">
+      <div class="flex items-center gap-1 px-1.5 border-r border-slate-800" title="Current Dungeon Floor">
         <span class="text-[10px] font-mono uppercase text-cyan-400">Floor</span>
         <button onclick="adjustDungeonFloor(-1)" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono font-bold text-xs leading-none">-</button>
         <span id="dungeonFloorText" class="font-mono font-extrabold text-sm text-cyan-300 px-0.5">1</span>
         <button onclick="adjustDungeonFloor(1)" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono font-bold text-xs leading-none">+</button>
       </div>
-      <div class="flex items-center gap-1 px-2 border-r border-slate-800">
-        <span class="text-[10px] font-mono uppercase text-slate-400">Round</span>
-        <button id="decRoundBtn" onclick="adjustCombatRound(-1)" title="Decrease Round (0 = Setup)" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono font-bold text-xs leading-none">-</button>
+      <div class="flex items-center gap-1 px-1.5 border-r border-slate-800">
+        <span class="text-[10px] font-mono uppercase text-slate-400">Rnd</span>
+        <button id="decRoundBtn" onclick="adjustCombatRound(-1)" title="Decrease Round" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono font-bold text-xs leading-none">-</button>
         <span id="roundCounterText" class="font-mono font-extrabold text-sm text-amber-400 px-0.5">0</span>
         <button id="incRoundBtn" onclick="adjustCombatRound(1)" title="Increase Round" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono font-bold text-xs leading-none">+</button>
       </div>
       <div id="phasePillsContainer" class="flex items-center gap-1"></div>
-      <button id="nextPhaseBtn" onclick="advanceCombatPhase()" class="ml-1 px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shrink-0 shadow">
-        Start Combat →
-      </button>
-    </div>
+      <button type="button" id="toggleExplorationModeBtn" onclick="toggleExplorationMode()" title="Toggle Out-of-Combat Exploration & RP Mode (Round 0)" class="px-2 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/50 text-cyan-200 font-bold text-xs transition shrink-0">🧭 Explore: ON</button>
+      <button id="rollSurpriseBtn" onclick="rollCombatSurpriseCheck()" title="Roll Party Surprise Check vs Highest Mob Surprise DC" class="px-2 py-1 rounded-lg bg-purple-500/20 hover:bg-purple-500/35 border border-purple-400/50 text-purple-200 font-bold text-xs transition shrink-0">⚡ Surprise</button>
+      <button id="nextPhaseBtn" onclick="advanceCombatPhase()" class="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shrink-0 shadow">Start Combat →</button>
 
-    <!-- Floor Collapse Countdown Clock & Party Rest Controls -->
-    <div class="flex items-center gap-1.5 bg-dungeon-950/95 border border-rose-500/35 rounded-xl px-2 py-1 overflow-x-auto max-w-full">
-      <div class="flex items-center gap-1.5 pr-2 border-r border-slate-800 shrink-0" title="Floor Collapse Countdown Timer">
-        <span class="text-[10px] font-mono uppercase text-rose-400 font-bold">⏳ Collapse:</span>
-        <span id="collapseClockDisplay" class="font-mono font-extrabold text-xs text-rose-300 tracking-wider">72h 00m</span>
+      <div id="collapseClockCluster" class="flex items-center gap-1 pl-2 ml-1 border-l border-slate-800 shrink-0" title="Floor Collapse Countdown Timer">
+        <span class="text-[10px] font-mono uppercase text-rose-400 font-bold">⏳</span>
+        <span id="collapseClockDisplay" class="font-mono font-extrabold text-xs text-rose-300">72h 00m</span>
+        <span id="clockDeltaBadge" class="hidden px-1 py-0.2 rounded bg-amber-500/20 border border-amber-400/50 text-amber-200 text-[9px] font-mono font-bold"></span>
         <button id="editCollapseClockBtn" onclick="adjustCollapseHours(1)" title="Add +1 Hour to Collapse Timer" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-slate-300">+1h</button>
-      </div>
-      <div id="restButtonsGroup" class="flex items-center gap-1 shrink-0">
-        <button onclick="applyPartyRest('hour')" title="1 Hour Out of Combat: +1 HB slot, +5 MP" class="px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 text-[10px] font-semibold transition">
-          +1h Idle
-        </button>
-        <button onclick="applyPartyRest('short')" title="Short Rest (2h): +5 HB slots, +50% Max MP" class="px-2 py-0.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-300 text-[10px] font-semibold transition">
-          Short (2h)
-        </button>
-        <button onclick="applyPartyRest('long')" title="Long Rest (8h): Full HB, Full MP, removes Fatigued" class="px-2 py-0.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/40 text-indigo-300 text-[10px] font-semibold transition">
-          Long (8h)
-        </button>
-        <button onclick="applyPartyRest('fullday')" title="Full Day's Rest (30h): Full HB, Full MP, clears Fatigued & Long-Term Injuries" class="px-2 py-0.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-[10px] font-semibold transition">
-          Full Day (30h)
-        </button>
+        <details id="restButtonsGroup" class="relative">
+          <summary class="cursor-pointer list-none px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-300 text-[10px] font-bold select-none">💤 Rest ▾</summary>
+          <div class="absolute right-0 mt-1.5 w-44 bg-dungeon-900 border border-slate-700 rounded-xl p-1.5 shadow-2xl z-50 space-y-1 text-[10px]">
+            <button type="button" onclick="applyPartyRest('hour'); this.closest('details').open=false;" class="w-full text-left px-2 py-1 rounded-lg hover:bg-slate-800 text-emerald-300 font-semibold">+1h Idle (+1 HB, +5 MP)</button>
+            <button type="button" onclick="applyPartyRest('short'); this.closest('details').open=false;" class="w-full text-left px-2 py-1 rounded-lg hover:bg-slate-800 text-cyan-300 font-semibold">Short Rest 2h (+5 HB, +50% MP)</button>
+            <button type="button" onclick="applyPartyRest('long'); this.closest('details').open=false;" class="w-full text-left px-2 py-1 rounded-lg hover:bg-slate-800 text-indigo-300 font-semibold">Long Rest 8h (Full HB &amp; MP)</button>
+            <button type="button" onclick="applyPartyRest('fullday'); this.closest('details').open=false;" class="w-full text-left px-2 py-1 rounded-lg hover:bg-slate-800 text-amber-300 font-semibold">Full Day 30h (Clears Injuries)</button>
+          </div>
+        </details>
       </div>
     </div>
 
-    <!-- Right: Tactical Toggles, Dual-Window & Drawer Toggle -->
+    <!-- Right: Compact Dropdowns + Primary Drawers -->
     <div class="flex items-center gap-1.5 flex-wrap">
-      <button id="toggleRangesBtn" onclick="toggleTacticalOverlay()" title="Toggle 4-Ring Movement Overlays on GM Map" class="px-2.5 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-300 text-xs font-semibold transition">
-        Ranges: ON
-      </button>
-      <button id="toggleAutoApBtn" onclick="toggleAutoMoveAp()" title="Automatically deduct Action Points when moving tokens on the grid" class="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 text-xs font-semibold transition">
-        Auto-AP: ON
-      </button>
-      <button id="togglePlayerHudModalBtn" onclick="togglePlayerHudWindow()" title="Open/Close Floating Player HUD Window" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-sky-600/20 hover:bg-sky-600/35 border border-sky-500/40 text-sky-300 text-xs font-semibold transition">
-        <span>🛡️</span>
-        <span>Player HUD</span>
-      </button>
-      <button id="openPlayerWindowBtn" onclick="openPlayerProjectionWindow()" title="Pop out Player Display in a second browser window on this PC" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/35 border border-indigo-500/40 text-indigo-300 text-xs font-semibold transition">
-        <span>🖥️</span>
-        <span class="hidden sm:inline">Pop-Out Player</span>
-      </button>
-      <button id="hostOnlineRoomBtn" onclick="openOnlineShareModal()" title="Host an online room & copy an invite link for remote players" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/40 text-emerald-300 text-xs font-semibold transition">
-        <span>🌐</span>
-        <span id="hostOnlineBtnLabel">Share Online</span>
-      </button>
-      <span id="remotePlayerSyncBadge" class="hidden px-2.5 py-1 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[11px] font-mono font-bold">
-        🌐 Connecting...
-      </span>
-      <button id="claimCrawlerBtn" onclick="openPlayerClaimModal()" title="Choose or switch your controlled Crawler" class="hidden flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/50 text-cyan-200 text-xs font-bold transition">
-        <span>🎭</span>
-        <span id="claimCrawlerBtnLabel">Claim Crawler</span>
-      </button>
-      <button id="togglePlayerDeckBtn" onclick="togglePlayerControlDeck()" title="Toggle Your Crawler Control HUD" class="hidden flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-400/50 text-emerald-200 text-xs font-bold transition">
-        <span>🎮</span>
-        <span id="playerDeckBtnLabel">Crawler HUD</span>
-      </button>
-      <button id="lockGmScreenBtn" onclick="lockGmScreenNow()" title="Lock the GM Screen behind your persistent GM PIN" class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-rose-950/70 hover:bg-rose-900 border border-rose-500/40 text-rose-200 text-xs font-semibold transition">
-        <span>🔒</span>
-        <span class="hidden sm:inline">Lock GM</span>
-      </button>
+      <button id="toggleRollHistoryTopBtn" onclick="toggleDiceRollHistory()" title="Show/Hide Last 10 Combat & Skill Rolls" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold transition">📜 Rolls</button>
+
+      <!-- GM Tools Dropdown -->
+      <details id="gmToolsDropdown" class="relative">
+        <summary class="cursor-pointer list-none px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-amber-200 text-xs font-bold select-none">🧰 GM Tools ▾</summary>
+        <div class="absolute right-0 mt-1.5 w-48 bg-dungeon-900 border border-slate-700 rounded-xl p-1.5 shadow-2xl z-50 space-y-1 text-xs">
+          <button type="button" id="gmCampaignBtn" onclick="openGmCampaignModal(); document.getElementById('gmToolsDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-purple-200 font-semibold">🗺️ Campaign Deck</button>
+          <button type="button" id="gmAdvancementBtn" onclick="openGmAdvancementModal(); document.getElementById('gmToolsDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-cyan-200 font-semibold">📈 Advance &amp; Grind</button>
+          <button type="button" id="craftingBtn" onclick="openCraftingModal(); document.getElementById('gmToolsDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-amber-200 font-semibold">🛠️ Craft &amp; Enchant</button>
+          <button type="button" id="gmLootBoxBtn" onclick="openGmLootBoxModal(); document.getElementById('gmToolsDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-amber-200 font-semibold">🎁 Loot Box Gen</button>
+          <button type="button" id="howToGuideBtn" onclick="openHowToModal('howto'); document.getElementById('gmToolsDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-slate-200 font-semibold">📖 How To &amp; Rules</button>
+          <div class="border-t border-slate-800 my-1"></div>
+          <button type="button" id="gmQuickSaveBtn" onclick="quickSaveCurrentState(); document.getElementById('gmToolsDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-emerald-300 font-semibold">💾 Quicksave</button>
+          <button type="button" id="lockGmScreenBtn" onclick="lockGmScreenNow(); document.getElementById('gmToolsDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-rose-300 font-semibold">🔒 Lock GM Screen</button>
+        </div>
+      </details>
+
+      <!-- Tactical & Display Dropdown -->
+      <details id="tacticalDisplayDropdown" class="relative">
+        <summary class="cursor-pointer list-none px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-cyan-200 text-xs font-bold select-none">⚙️ Toggles &amp; Sync ▾</summary>
+        <div class="absolute right-0 mt-1.5 w-56 bg-dungeon-900 border border-slate-700 rounded-xl p-2 shadow-2xl z-50 space-y-1.5 text-xs">
+          <button type="button" id="toggleRangesBtn" onclick="toggleTacticalOverlay()" class="w-full text-left px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-cyan-200 font-semibold">Ranges: ON</button>
+          <button type="button" id="toggleAutoApBtn" onclick="toggleAutoMoveAp()" class="w-full text-left px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-200 font-semibold">Auto-AP: ON</button>
+          <button type="button" id="togglePhaseLockBtn" onclick="toggleCombatPhaseLock()" class="w-full text-left px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-200 font-semibold">🔒 Phase Lock: ON</button>
+          <button type="button" id="toggleMinimapBtn" onclick="togglePlayerMinimapStatus()" class="w-full text-left px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold">🗺️ Minimap: ON</button>
+          <div class="border-t border-slate-800 my-1"></div>
+          <button type="button" id="togglePlayerHudModalBtn" onclick="togglePlayerHudWindow(); document.getElementById('tacticalDisplayDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-sky-300 font-semibold">🛡️ Floating Player HUD</button>
+          <button type="button" id="openPlayerWindowBtn" onclick="openPlayerProjectionWindow(); document.getElementById('tacticalDisplayDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-indigo-300 font-semibold">🖥️ Pop-Out Player</button>
+          <button type="button" id="hostOnlineRoomBtn" onclick="openOnlineShareModal(); document.getElementById('tacticalDisplayDropdown').open=false;" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-emerald-300 font-semibold">🌐 <span id="hostOnlineBtnLabel">Share Online</span></button>
+        </div>
+      </details>
+
+      <span id="remotePlayerSyncBadge" class="hidden px-2.5 py-1 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[11px] font-mono font-bold">🌐 Connecting...</span>
+      <button id="claimCrawlerBtn" onclick="openPlayerClaimModal()" title="Choose or switch your controlled Crawler" class="hidden flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/50 text-cyan-200 text-xs font-bold transition">🎭 <span id="claimCrawlerBtnLabel">Claim Crawler</span></button>
+      <button id="togglePlayerDeckBtn" onclick="togglePlayerControlDeck()" title="Toggle Your Crawler Control HUD" class="hidden flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-400/50 text-emerald-200 text-xs font-bold transition">🎮 <span id="playerDeckBtnLabel">Crawler HUD</span></button>
       <button id="toggleGmDrawerBtn" onclick="toggleGmDrawer()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-xs font-bold transition">
         <span>🛠️</span>
-        <span id="gmDrawerBtnLabel">GM Control Deck</span>
+        <span id="gmDrawerBtnLabel">GM Deck</span>
       </button>
     </div>
   </header>
@@ -279,10 +307,27 @@
 
       <!-- Synced Live Dice Roll & Evade Resolution Banner (Visible on Both GM & Player Displays) -->
       <div id="liveDiceRollBanner" class="hidden fixed top-28 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-lg bg-dungeon-900/95 border-2 border-amber-400/70 rounded-2xl p-3 shadow-2xl backdrop-blur-md transition-all"></div>
+      <!-- Private Crawler-Only Alert Pop-Up (Only shown to the crawler who passed/unlocked the intel) -->
+      <div id="privateCrawlerAlertPopup" class="hidden fixed bottom-24 right-4 z-50 w-[90vw] max-w-sm bg-gradient-to-br from-cyan-950/95 via-slate-900/95 to-emerald-950/95 border-2 border-cyan-400/80 rounded-2xl p-3.5 shadow-2xl backdrop-blur-md">
+        <div class="flex items-start justify-between gap-2 border-b border-cyan-500/30 pb-1.5 mb-2">
+          <div>
+            <div class="text-[9.5px] font-mono uppercase tracking-widest text-cyan-300 font-black">🔒 PRIVATE CRAWLER INTEL</div>
+            <div id="privateCrawlerAlertTitle" class="font-bold text-xs text-white mt-0.5"></div>
+          </div>
+          <button type="button" onclick="dismissPrivateCrawlerAlert()" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>
+        </div>
+        <div id="privateCrawlerAlertBody" class="text-[11px] text-cyan-100 leading-relaxed space-y-1"></div>
+        <div id="privateCrawlerAlertActions" class="mt-2.5 flex items-center justify-end gap-1.5"></div>
+      </div>
 
       <!-- Canvas Container -->
       <div id="canvasWrapper" class="flex-1 relative overflow-hidden">
         <canvas id="battleCanvas"></canvas>
+
+        <!-- Player Display Minimap Offline Alert (Triggered by GM for Traps / Packrooms) -->
+        <div id="playerMinimapOfflineBadge" class="hidden pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 rounded-xl bg-rose-950/90 border border-rose-500/70 text-rose-200 text-xs font-mono font-bold tracking-wider shadow-2xl backdrop-blur flex items-center gap-2 animate-pulse">
+          <span>⚠️ SYSTEM AI // MINIMAP OFFLINE — NAVIGATION SCRAMBLED</span>
+        </div>
 
         <!-- Setup Mode Full Blackout Curtain (Player Display Only in Round 0) -->
         <div id="playerSetupBlackout" class="hidden absolute inset-0 bg-dungeon-950 flex flex-col items-center justify-center text-center p-6 z-40">
@@ -311,6 +356,9 @@
           <button onclick="resetCameraView()" title="Center & Reset Zoom" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono">
             ⌖ Fit
           </button>
+          <button id="toolFloorBtn" onclick="setCanvasTool('floor')" title="Raise or Lower Floor in 5ft steps (Click +5ft, Shift+Click -5ft, Alt+Click 0ft)" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold text-xs transition">
+            ⛰️ Floor ±5ft
+          </button>
           <button id="toggleGridBtn" onclick="toggleGridVisibility()" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-mono">
             # Grid
           </button>
@@ -322,7 +370,18 @@
           </button>
         </div>
 
-        <!-- Wall & Door Drawing Sub-Bar -->
+        <!-- Floor 5ft Paint Brush Sub-Bar -->
+        <div id="floorToolSubBar" class="hidden absolute top-16 left-3 flex flex-wrap items-center gap-1.5 bg-dungeon-900/95 backdrop-blur-md border border-cyan-500/40 rounded-xl px-2.5 py-1.5 shadow-xl z-20 text-xs">
+          <span class="font-mono text-[10px] uppercase text-cyan-300 font-bold">Brush:</span>
+          <button id="floorBrushRaiseBtn" type="button" onclick="setFloorBrushMode('raise5')" class="px-2.5 py-0.5 rounded bg-cyan-500 text-slate-950 font-extrabold text-[11px] shadow">▲ +5ft</button>
+          <button id="floorBrushLowerBtn" type="button" onclick="setFloorBrushMode('lower5')" class="px-2.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-[11px] border border-amber-500/30">▼ -5ft</button>
+          <button id="floorBrushZeroBtn" type="button" onclick="setFloorBrushMode('reset0')" class="px-2.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-[11px]">0ft</button>
+          <span class="h-3.5 w-px bg-slate-700 mx-0.5"></span>
+          <button type="button" onclick="adjustSelectedOrHoveredFloor(5, false)" title="Step selected/hovered tile +5ft once" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-200 font-semibold text-[10px]">+1 Step Selected</button>
+          <span class="text-[10px] text-slate-400 pl-1">Arm +5ft or -5ft then click any tiles on the map (Right-click lowers -5ft)</span>
+        </div>
+
+                <!-- Wall & Door Drawing Sub-Bar -->
         <div id="wallToolSubBar" class="hidden absolute top-16 left-3 flex flex-wrap items-center gap-1.5 bg-dungeon-900/95 backdrop-blur-md border border-cyan-500/40 rounded-xl px-2.5 py-1.5 shadow-xl z-20 text-xs">
           <span class="font-mono text-[10px] uppercase text-cyan-300 font-bold">Segment:</span>
           <button id="wallTypeWallBtn" onclick="setWallDrawKind('wall')" class="px-2 py-0.5 rounded bg-cyan-500 text-slate-950 font-bold text-[11px]">🧱 Wall</button>
@@ -510,10 +569,19 @@
 
     <!-- RIGHT SLIDE-IN PLAYER CRAWLER CONTROL HUD DRAWER -->
     <aside id="playerControlDeck" class="hidden w-full sm:w-[390px] bg-dungeon-900 border-l border-cyan-500/30 flex flex-col shrink-0 z-30 overflow-hidden">
-      <div class="grid grid-cols-3 gap-1 p-2 bg-dungeon-950 border-b border-slate-800 shrink-0">
-        <button id="playerDeckTabBtn_actions" onclick="setPlayerDeckTab('actions')" class="px-1.5 py-1.5 rounded-lg text-[10px] font-bold bg-cyan-500 text-slate-950 transition">⚔️ Actions</button>
-        <button id="playerDeckTabBtn_skills" onclick="setPlayerDeckTab('skills')" class="px-1.5 py-1.5 rounded-lg text-[10px] font-semibold bg-dungeon-850 text-slate-300 hover:bg-dungeon-800 transition">📚 Skills (R0)</button>
-        <button id="playerDeckTabBtn_sheet" onclick="setPlayerDeckTab('sheet')" class="px-1.5 py-1.5 rounded-lg text-[10px] font-semibold bg-dungeon-850 text-slate-300 hover:bg-dungeon-800 transition">🎒 Sheet</button>
+      <div id="playerTimeBanner" class="flex items-center justify-between gap-2 px-3 py-1.5 bg-rose-950/35 border-b border-rose-500/30 text-[10px] font-mono shrink-0">
+        <div class="flex items-center gap-1.5">
+          <span class="text-rose-400 font-bold">⏳ Collapse:</span>
+          <span id="playerCollapseClockVal" class="font-extrabold text-rose-200">72h 00m</span>
+        </div>
+        <span id="playerClockActivityBadge" class="text-slate-400">Moves on Rests &amp; Grinding</span>
+      </div>
+      <div class="grid grid-cols-5 gap-1 p-2 bg-dungeon-950 border-b border-slate-800 shrink-0">
+        <button id="playerDeckTabBtn_actions" onclick="setPlayerDeckTab('actions')" class="px-1 py-1.5 rounded-lg text-[10px] font-bold bg-cyan-500 text-slate-950 transition">⚡ Hotlist</button>
+        <button id="playerDeckTabBtn_learned" onclick="setPlayerDeckTab('learned')" class="px-1 py-1.5 rounded-lg text-[10px] font-semibold bg-dungeon-850 text-slate-300 hover:bg-dungeon-800 transition">📖 Learned</button>
+        <button id="playerDeckTabBtn_skills" onclick="setPlayerDeckTab('skills')" class="px-1 py-1.5 rounded-lg text-[10px] font-semibold bg-dungeon-850 text-slate-300 hover:bg-dungeon-800 transition">🎲 R0</button>
+        <button id="playerDeckTabBtn_items" onclick="setPlayerDeckTab('items')" class="px-1 py-1.5 rounded-lg text-[10px] font-semibold bg-dungeon-850 text-slate-300 hover:bg-dungeon-800 transition">🎒 Items</button>
+        <button id="playerDeckTabBtn_sheet" onclick="setPlayerDeckTab('sheet')" class="px-1 py-1.5 rounded-lg text-[10px] font-semibold bg-dungeon-850 text-slate-300 hover:bg-dungeon-800 transition">📋 Sheet</button>
       </div>
       <div id="playerControlDeckBody" class="flex-1 overflow-y-auto p-3 space-y-3"></div>
     </aside>
@@ -625,7 +693,7 @@
             </div>
             <div class="grid grid-cols-3 gap-1.5 font-mono text-[10px]">
               <label>Category
-                <select id="newObjCategory" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-200">
+                <select id="newObjCategory" onchange="toggleTrapBuilderFields()" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-200">
                   <option value="Cover / Obstacle">Cover / Obstacle</option>
                   <option value="Container / Loot">Container / Loot</option>
                   <option value="Hazard / Trap">Hazard / Trap</option>
@@ -634,6 +702,51 @@
               </label>
               <label>Light(ft)<input id="newObjLight" type="number" value="0" min="0" step="5" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1" /></label>
               <label>Ring Color<input id="newObjColor" type="color" value="#10b981" class="mt-0.5 w-full h-6 bg-transparent border-0 cursor-pointer" /></label>
+            </div>
+                        <div id="trapBuilderFields" class="hidden bg-rose-950/35 border border-rose-500/40 rounded-lg p-2 space-y-1.5 text-[10px] font-mono">
+              <div class="font-bold text-rose-300 uppercase tracking-wider">⚠️ Trap Mechanics &amp; Concealment</div>
+              <div class="grid grid-cols-3 gap-1.5">
+                <label>Concealment
+                  <select id="newTrapConcealment" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1 py-1 text-slate-100">
+                    <option value="somethings_off">Something's Off (Std)</option>
+                    <option value="obvious">Obvious (Easy)</option>
+                    <option value="totally_hidden">Totally Hidden (Amazing)</option>
+                  </select>
+                </label>
+                <label>Trap Type
+                  <select id="newTrapKind" onchange="toggleTrapBuilderFields()" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1 py-1 text-slate-100">
+                    <option value="damage">Damage (Xd6 Floor)</option>
+                    <option value="debuff">Debuff / Snare</option>
+                    <option value="collapse">Collapse Clock Drain</option>
+                    <option value="teleport">Teleport Anchor</option>
+                  </select>
+                </label>
+                <label>Disarm Checks
+                  <input id="newTrapChecksReq" type="number" min="1" max="5" value="1" title="1 = Simple Trap, 3+ = Complex Trap" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-100" />
+                </label>
+              </div>
+              <div class="grid grid-cols-3 gap-1.5">
+                <label>Detect DC Base
+                  <input id="newTrapDetectDc" type="number" min="5" max="30" value="12" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-100" />
+                </label>
+                <label>Disarm DC Base
+                  <input id="newTrapDisarmDc" type="number" min="5" max="30" value="13" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-100" />
+                </label>
+                <label>Payload / Floor Dmg
+                  <input id="newTrapDamageExpr" type="text" value="Fd6" placeholder="Fd6 / 2d6+F" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-100" />
+                </label>
+              </div>
+              <div class="grid grid-cols-3 gap-1.5">
+                <label>Apply Debuff
+                  <input id="newTrapDebuff" type="text" placeholder="e.g. Immobilized" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-100" />
+                </label>
+                <label>Clock Drain (hrs)
+                  <input id="newTrapClockDrain" type="number" min="0" max="24" value="0" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-100" />
+                </label>
+                <label>Teleport X,Y
+                  <input id="newTrapTeleportXY" type="text" placeholder="e.g. 12,8" class="mt-0.5 w-full bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-100" />
+                </label>
+              </div>
             </div>
             <input id="newObjNotes" type="text" placeholder="Rules / Cover Bonus (+2 DR) / Loot Notes..." class="w-full bg-dungeon-900 border border-slate-700 rounded px-2 py-1 text-[11px] text-slate-200" />
             <label class="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
@@ -671,6 +784,42 @@
               <button id="clearSkillsBtn" onclick="clearCatalogWithConfirm('skills')" class="px-2 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-300 text-[11px] font-semibold">Clear All</button>
             </div>
           </div>
+          <details class="bg-dungeon-950 border border-amber-500/35 rounded-xl p-2 text-xs">
+            <summary class="cursor-pointer font-bold text-amber-300 text-[11px] uppercase tracking-wider select-none">➕ Create Custom Skill (Ch. 4 Framework)</summary>
+            <form onsubmit="handleCreateCustomSkillSubmit(event)" class="mt-2 pt-2 border-t border-slate-800 space-y-1.5 text-[11px]">
+              <div class="grid grid-cols-3 gap-1.5">
+                <input id="newCustomSkillName" type="text" required placeholder="Skill Name (e.g. Needle)" class="col-span-2 bg-dungeon-900 border border-slate-700 rounded-lg px-2 py-1 text-slate-100" />
+                <select id="newCustomSkillGroup" class="bg-dungeon-900 border border-slate-700 rounded-lg px-1.5 py-1 text-slate-200">
+                  <option value="attack">⚔️ Attack</option>
+                  <option value="utility">🛠️ Utility</option>
+                </select>
+              </div>
+              <div class="grid grid-cols-3 gap-1.5 font-mono text-[10px]">
+                <select id="newCustomSkillStat" class="bg-dungeon-900 border border-slate-700 rounded-lg px-1.5 py-1 text-slate-200">
+                  <option value="Str">Hit: Str</option>
+                  <option value="Dex">Hit: Dex</option>
+                  <option value="Int">Hit: Int</option>
+                  <option value="Con">Hit: Con</option>
+                  <option value="Cha">Hit: Cha</option>
+                </select>
+                <input id="newCustomSkillRange" type="text" value="5 feet" placeholder="Range (5 ft / Self)" class="bg-dungeon-900 border border-slate-700 rounded-lg px-1.5 py-1 text-slate-200" />
+                <input id="newCustomSkillDmg" type="text" placeholder="Base Dmg (1d4 + Dex)" class="bg-dungeon-900 border border-slate-700 rounded-lg px-1.5 py-1 text-slate-200" />
+              </div>
+              <input id="newCustomSkillDesc" type="text" required placeholder="Base Rank 1 effect / description..." class="w-full bg-dungeon-900 border border-slate-700 rounded-lg px-2 py-1 text-slate-200" />
+              <div class="space-y-1 font-mono text-[10px]">
+                <input id="newCustomSkillR5" type="text" placeholder="Rank 5 Upgrade (e.g. +1d4 base damage)" class="w-full bg-dungeon-900 border border-slate-700 rounded px-2 py-1 text-slate-200" />
+                <input id="newCustomSkillR10" type="text" placeholder="Rank 10 Upgrade (optional)" class="w-full bg-dungeon-900 border border-slate-700 rounded px-2 py-1 text-slate-200" />
+                <input id="newCustomSkillR15" type="text" placeholder="Rank 15 Upgrade (optional)" class="w-full bg-dungeon-900 border border-slate-700 rounded px-2 py-1 text-slate-200" />
+              </div>
+              <div class="flex items-center justify-between pt-0.5">
+                <label class="inline-flex items-center gap-1.5 text-[10px] text-slate-300 cursor-pointer">
+                  <input id="newCustomSkillPassive" type="checkbox" class="accent-emerald-400" />
+                  <span>Passive Skill (no check, cannot use R0)</span>
+                </label>
+                <button type="submit" class="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] transition">+ Save Skill</button>
+              </div>
+            </form>
+          </details>
           <input id="skillsSearchInput" type="text" oninput="renderSkillsCatalog()" placeholder="Search attack & utility skills..." class="w-full bg-dungeon-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs" />
           <div id="skillsCatalogList" class="space-y-2"></div>
         </div>
@@ -776,6 +925,42 @@
               </button>
               <button onclick="clearSceneMapImage()" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold">
                 Clear Map Image
+              </button>
+            </div>
+          </div>
+
+          <!-- SAVE STATES (INDEXEDDB SLOTS + QUICKSAVE + JSON IMPORT/EXPORT) -->
+          <div class="bg-dungeon-950 border border-cyan-500/40 rounded-xl p-3 space-y-2.5">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-bold text-cyan-400 uppercase tracking-wider text-[11px]">💾 Save States & Campaign Backups</span>
+              <span class="text-[9.5px] font-mono text-slate-400">IndexedDB (High Capacity)</span>
+            </div>
+
+            <div class="flex gap-1.5">
+              <input id="newSaveSlotNameInput" type="text" onkeydown="if(event.key==='Enter'){event.preventDefault();saveNamedStateSlot();}" placeholder="Save name (e.g. Floor 1 — Pre-Boss)..." class="flex-1 min-w-0 bg-dungeon-900 border border-slate-700 focus:border-cyan-400 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-100 focus:outline-none" />
+              <button type="button" onclick="saveNamedStateSlot()" class="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-[11px] shrink-0 transition">
+                + Save Slot
+              </button>
+            </div>
+
+            <div class="grid grid-cols-2 gap-1.5">
+              <button type="button" onclick="quickSaveCurrentState()" class="px-2.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/35 border border-amber-500/40 text-amber-200 font-bold text-[11px] transition">
+                ⚡ Quicksave
+              </button>
+              <button type="button" onclick="quickLoadSavedState()" class="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-500/40 text-emerald-200 font-bold text-[11px] transition">
+                ↺ Quickload
+              </button>
+            </div>
+
+            <div id="saveStatesList" class="space-y-1.5 max-h-60 overflow-y-auto pr-0.5"></div>
+
+            <div class="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-800">
+              <label class="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] cursor-pointer transition">
+                📂 Import Campaign JSON
+                <input type="file" accept=".json" onchange="handleImportCampaignJsonFile(event)" class="hidden" />
+              </label>
+              <button type="button" onclick="exportSessionJson()" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-[11px] transition">
+                💾 Export Current JSON
               </button>
             </div>
           </div>
@@ -1074,14 +1259,126 @@
     </div>
   </div>
 
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: CHAPTER 4 CRAFTING & ENCHANTING (GM & PLAYERS • OUT OF COMBAT) -->
+  <!-- ===================================================================== -->
+  <div id="craftingModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-dungeon-900 border border-amber-500/50 rounded-2xl w-full max-w-2xl p-4 space-y-3 shadow-2xl text-xs max-h-[92vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+        <div>
+          <h3 class="font-display font-bold text-base text-amber-400">🛠️ System AI // Crafting & Enchanting (Ch. 4)</h3>
+          <p class="text-[11px] text-slate-400">Out-of-Combat Only • Mundane Junk, Enchanting DCs, Tables, Concoctions & Infusions</p>
+        </div>
+        <button type="button" onclick="closeCraftingModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>
+      </div>
+      <div id="craftingModalBody" class="space-y-3"></div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: GM-ONLY LOOT BOX GENERATOR & AWARDER                           -->
+  <!-- ===================================================================== -->
+  <div id="gmLootBoxModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-dungeon-900 border border-amber-500/50 rounded-2xl w-full max-w-2xl p-4 space-y-3 shadow-2xl text-xs max-h-[92vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+        <div>
+          <h3 class="font-display font-bold text-base text-amber-400">🎁 GM Loot Box Generator (Ch. 4 Rules)</h3>
+          <p class="text-[11px] text-slate-400">Strictly GM-Only • Tables 38–42 Randomizer, Sample Gear, Gold & Direct/Sealed Awarding</p>
+        </div>
+        <button type="button" onclick="closeGmLootBoxModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>
+      </div>
+      <div id="gmLootBoxModalBody" class="space-y-3"></div>
+    </div>
+  </div>
+
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: GM CRAWLER ADVANCEMENT, SKILL-UPS & GRINDING MONTAGE           -->
+  <!-- ===================================================================== -->
+  <div id="gmAdvancementModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-dungeon-900 border border-cyan-500/50 rounded-2xl w-full max-w-2xl p-4 space-y-3 shadow-2xl text-xs max-h-[92vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+        <div>
+          <h3 class="font-display font-bold text-base text-cyan-300">📈 Crawler Advancement & Grinding (Ch. 3)</h3>
+          <p class="text-[11px] text-slate-400">2-Hour Milestones • Marked Skill Checks (1d20 ≥ Rank) • Boss Levels • Grinding Montage</p>
+        </div>
+        <button type="button" onclick="closeGmAdvancementModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>
+      </div>
+      <div id="gmAdvancementModalBody" class="space-y-3"></div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: GM NEIGHBORHOOD & CAMPAIGN REFERENCE DECK                      -->
+  <!-- ===================================================================== -->
+  <div id="gmCampaignModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-dungeon-900 border border-purple-500/50 rounded-2xl w-full max-w-3xl p-4 space-y-3 shadow-2xl text-xs max-h-[92vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+        <div>
+          <h3 class="font-display font-bold text-base text-purple-300">🗺️ GM Campaign & Neighborhood Deck</h3>
+          <p class="text-[11px] text-slate-400">Strictly GM-Only • Quarters, One-Click Spawns, NPCs, Traps, Achievements & Random Tables</p>
+        </div>
+        <button type="button" onclick="closeGmCampaignModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>
+      </div>
+      <div id="gmCampaignModalBody" class="space-y-3"></div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: HOW TO GUIDE & SEARCHABLE RULES COMPENDIUM                     -->
+  <!-- ===================================================================== -->
+  <div id="howToCompendiumModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-dungeon-900 border border-amber-500/50 rounded-2xl w-full max-w-3xl p-4 space-y-3 shadow-2xl text-xs max-h-[92vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+        <div>
+          <h3 class="font-display font-bold text-base text-amber-400">📖 System AI // Guide, Tour & Rules Compendium</h3>
+          <p class="text-[11px] text-slate-400">Workflows • Interactive Tour • Searchable Combat, Stats, Crits & VTT Rules</p>
+        </div>
+        <button type="button" onclick="closeHowToModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>
+      </div>
+      <div id="howToCompendiumBody" class="space-y-3"></div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: PLAYER INTERACTIVE GRINDING HUD (INITIATED BY GM)              -->
+  <!-- ===================================================================== -->
+  <div id="playerGrindSessionModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-dungeon-900 border-2 border-amber-400/70 rounded-2xl w-full max-w-lg p-4 space-y-3 shadow-2xl text-xs max-h-[92vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+        <div>
+          <h3 class="font-display font-bold text-base text-amber-400">🏋️ System AI // Grinding Montage</h3>
+          <p class="text-[11px] text-slate-400">Select how many hours to grind and which learned skill to train</p>
+        </div>
+      </div>
+      <div id="playerGrindSessionBody" class="space-y-3"></div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- OVERLAY: INTERACTIVE GUIDED TOUR SPOTLIGHT                              -->
+  <!-- ===================================================================== -->
+  <div id="guidedTourOverlay" class="hidden fixed inset-0 z-40 pointer-events-none">
+    <div id="guidedTourCard" class="pointer-events-auto fixed bg-dungeon-900/98 backdrop-blur-md border-2 border-emerald-400/80 rounded-2xl p-3.5 shadow-2xl text-xs z-50"></div>
+  </div>
+
   <!-- ===================================================================== -->
   <!-- JAVASCRIPT ENGINE                                                     -->
   <!-- ===================================================================== -->
-  <script src="dcc-data.js?v=1"></script>
-  <script src="engine-state.js?v=10"></script>
-  <script src="engine-net.js?v=6"></script>
-  <script src="engine-canvas.js?v=5"></script>
+  <script src="dcc-data.js?v=4"></script>
+  <script src="engine-state.js?v=29"></script>
+  <script src="engine-net.js?v=17"></script>
+  <script src="engine-canvas.js?v=14"></script>
   <script src="crawler-wizard.js?v=1"></script>
-  <script src="engine-ui.js?v=10"></script>
+  <script src="save-states.js?v=1"></script>
+  <script src="loot-engine.js?v=1"></script>
+  <script src="crafting-engine.js?v=1"></script>
+  <script src="pets-engine.js?v=1"></script>
+  <script src="advancement-engine.js?v=7"></script>
+  <script src="combat-actions.js?v=9"></script>
+  <script src="campaign-data.js?v=2"></script>
+  <script src="guide-tour.js?v=3"></script>
+  <script src="engine-ui.js?v=33"></script>
 </body>
 </html>

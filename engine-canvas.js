@@ -10,6 +10,59 @@ const fowCtx = fowCanvas.getContext('2d');
 const exploredMemCanvas = document.createElement('canvas');
 const exploredMemCtx = exploredMemCanvas.getContext('2d');
 
+// Seamless tileable procedural smoke/mist texture for tangible Fog of War
+const fogSmokeTileSize = 256;
+const fogSmokeTileCanvas = document.createElement('canvas');
+fogSmokeTileCanvas.width = fogSmokeTileSize;
+fogSmokeTileCanvas.height = fogSmokeTileSize;
+const fogSmokeTileCtx = fogSmokeTileCanvas.getContext('2d');
+let fogSmokePattern = null;
+
+(function buildProceduralFogSmokeTile() {
+  const s = fogSmokeTileSize;
+  const tctx = fogSmokeTileCtx;
+  tctx.clearRect(0, 0, s, s);
+  let seed = 133742;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+
+  // Layer 56 toroidal soft smoke puffs so tiling has zero seams
+  for (let i = 0; i < 56; i++) {
+    const cx = rand() * s;
+    const cy = rand() * s;
+    const r = 28 + rand() * 54;
+    const kind = i % 3;
+    let cInner, cMid;
+    if (kind === 0) {
+      cInner = `rgba(51, 65, 85, ${(0.20 + rand() * 0.14).toFixed(3)})`;
+      cMid = `rgba(30, 41, 59, ${(0.10 + rand() * 0.08).toFixed(3)})`;
+    } else if (kind === 1) {
+      cInner = `rgba(148, 163, 184, ${(0.11 + rand() * 0.08).toFixed(3)})`;
+      cMid = `rgba(71, 85, 105, ${(0.06 + rand() * 0.05).toFixed(3)})`;
+    } else {
+      cInner = `rgba(4, 8, 18, ${(0.34 + rand() * 0.18).toFixed(3)})`;
+      cMid = `rgba(15, 23, 42, ${(0.16 + rand() * 0.10).toFixed(3)})`;
+    }
+    for (let ox = -s; ox <= s; ox += s) {
+      for (let oy = -s; oy <= s; oy += s) {
+        const px = cx + ox;
+        const py = cy + oy;
+        if (px + r < 0 || px - r > s || py + r < 0 || py - r > s) continue;
+        const g = tctx.createRadialGradient(px, py, r * 0.08, px, py, r);
+        g.addColorStop(0, cInner);
+        g.addColorStop(0.55, cMid);
+        g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        tctx.fillStyle = g;
+        tctx.beginPath();
+        tctx.arc(px, py, r, 0, Math.PI * 2);
+        tctx.fill();
+      }
+    }
+  }
+})();
+
 function resizeBattleCanvas() {
   const wrap = document.getElementById('canvasWrapper');
   if (!wrap) return;
@@ -235,14 +288,16 @@ function updateExplorationMemoryAndGhosts(scene, gs, crawlerVisList, blockingWal
   scene.exploredSpots = scene.exploredSpots || [];
   scene.ghostMarkers = scene.ghostMarkers || [];
 
-  crawlerVisList.forEach(cv => {
-    const radFt = Math.round((cv.radiusPx / gs) * 5);
-    const exists = scene.exploredSpots.some(sp => Math.hypot(sp.wx - cv.ox, sp.wy - cv.oy) < gs * 0.6 && sp.radiusFt >= radFt);
-    if (!exists) {
-      scene.exploredSpots.push({ wx: cv.ox, wy: cv.oy, radiusFt: radFt });
-      exploredMemDirty = true;
-    }
-  });
+  if (!appState?.minimapOffline) {
+    crawlerVisList.forEach(cv => {
+      const radFt = Math.round((cv.radiusPx / gs) * 5);
+      const exists = scene.exploredSpots.some(sp => Math.hypot(sp.wx - cv.ox, sp.wy - cv.oy) < gs * 0.6 && sp.radiusFt >= radFt);
+      if (!exists) {
+        scene.exploredSpots.push({ wx: cv.ox, wy: cv.oy, radiusFt: radFt });
+        exploredMemDirty = true;
+      }
+    });
+  }
 
   (scene.tokens || []).forEach(tok => {
     if (tok.role !== 'mob') return;
@@ -253,6 +308,13 @@ function updateExplorationMemoryAndGhosts(scene, gs, crawlerVisList, blockingWal
       tok.wasSeenByCrawlers = true;
       tok.lastSeenGx = tok.gx;
       tok.lastSeenGy = tok.gy;
+      if (appState) {
+        appState.encounteredMobTypes = Array.isArray(appState.encounteredMobTypes) ? appState.encounteredMobTypes : [];
+        const mobKey = String(tok.templateId || tok.name || '').trim().toLowerCase();
+        if (mobKey && !appState.encounteredMobTypes.includes(mobKey)) {
+          appState.encounteredMobTypes.push(mobKey);
+        }
+      }
       scene.ghostMarkers = scene.ghostMarkers.filter(g => g.sourceTokenId !== tok.id);
     } else if (tok.wasSeenByCrawlers && tok.lastSeenGx !== undefined) {
       const existingGhost = scene.ghostMarkers.find(g => g.sourceTokenId === tok.id);
@@ -272,45 +334,197 @@ function updateExplorationMemoryAndGhosts(scene, gs, crawlerVisList, blockingWal
 }
 
 function rebuildExploredMemoryBuffer(scene, gs, blockingWalls, w, h) {
+  // Alpha mask of UNEXPLORED territory: 1.0 = unexplored (thick rolling smoke), 0.0 = explored (darkened memory only)
   exploredMemCtx.save();
   exploredMemCtx.globalCompositeOperation = 'source-over';
   exploredMemCtx.clearRect(0, 0, w, h);
-  exploredMemCtx.fillStyle = 'rgba(2, 4, 9, 0.96)';
+  exploredMemCtx.fillStyle = 'rgba(0, 0, 0, 1)';
   exploredMemCtx.fillRect(0, 0, w, h);
 
-  exploredMemCtx.globalCompositeOperation = 'destination-out';
-  (scene?.exploredSpots || []).forEach(sp => {
-    const sx = sp.wx * uiState.camZoom + uiState.camX;
-    const sy = sp.wy * uiState.camZoom + uiState.camY;
-    const sr = ((sp.radiusFt || 25) / 5) * gs * uiState.camZoom;
-    const poly = computeVisibilityPolygon(sp.wx, sp.wy, ((sp.radiusFt || 25) / 5) * gs, blockingWalls, 360, 0);
-    const screenPoly = poly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
-    const g = exploredMemCtx.createRadialGradient(sx, sy, sr * 0.65, sx, sy, sr);
-    g.addColorStop(0, 'rgba(0, 0, 0, 0.42)');
-    g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-    exploredMemCtx.fillStyle = g;
-    traceRayPolygonPath(exploredMemCtx, sx, sy, screenPoly, true);
-    exploredMemCtx.fill();
-  });
+  if (!appState?.minimapOffline) {
+    exploredMemCtx.globalCompositeOperation = 'destination-out';
+    (scene?.exploredSpots || []).forEach(sp => {
+      const sx = sp.wx * uiState.camZoom + uiState.camX;
+      const sy = sp.wy * uiState.camZoom + uiState.camY;
+      const sr = ((sp.radiusFt || 25) / 5) * gs * uiState.camZoom;
+      const poly = computeVisibilityPolygon(sp.wx, sp.wy, ((sp.radiusFt || 25) / 5) * gs, blockingWalls, 360, 0);
+      const screenPoly = poly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
+      const g = exploredMemCtx.createRadialGradient(sx, sy, sr * 0.62, sx, sy, sr);
+      g.addColorStop(0, 'rgba(0, 0, 0, 1)');
+      g.addColorStop(0.78, 'rgba(0, 0, 0, 0.85)');
+      g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      exploredMemCtx.fillStyle = g;
+      traceRayPolygonPath(exploredMemCtx, sx, sy, screenPoly, true);
+      exploredMemCtx.fill();
+    });
+  }
   exploredMemCtx.restore();
 
   exploredMemDirty = false;
-  lastExploredCameraKey = `${uiState.camX.toFixed(1)}|${uiState.camY.toFixed(1)}|${uiState.camZoom.toFixed(3)}`;
+  lastExploredCameraKey = `${uiState.camX.toFixed(1)}|${uiState.camY.toFixed(1)}|${uiState.camZoom.toFixed(3)}|${appState?.minimapOffline ? 1 : 0}`;
 }
 
-function hasLineOfSightBetweenPoints(x1, y1, x2, y2, blockingWalls) {
-  if (!blockingWalls || blockingWalls.length === 0) return true;
+function carveLiveVisionMask(targetCtx, crawlerVisList, lightSources, gs, blockingWalls, darknessAlpha, innerSoftFrac = 0.68) {
+  targetCtx.save();
+  targetCtx.beginPath();
+  crawlerVisList.forEach(cv => {
+    const screenLosPoly = cv.losPoly.map(p => ({
+      x: p.x * uiState.camZoom + uiState.camX,
+      y: p.y * uiState.camZoom + uiState.camY
+    }));
+    if (screenLosPoly.length > 0) {
+      targetCtx.moveTo(screenLosPoly[0].x, screenLosPoly[0].y);
+      for (let i = 1; i < screenLosPoly.length; i++) {
+        targetCtx.lineTo(screenLosPoly[i].x, screenLosPoly[i].y);
+      }
+      targetCtx.closePath();
+    }
+  });
+  targetCtx.clip();
+  targetCtx.globalCompositeOperation = 'destination-out';
+
+  const isTrueDark = darknessAlpha >= 0.85;
+  crawlerVisList.forEach(cv => {
+    const sx = cv.ox * uiState.camZoom + uiState.camX;
+    const sy = cv.oy * uiState.camZoom + uiState.camY;
+    if (!isTrueDark) {
+      const fullSr = cv.losRadiusPx * uiState.camZoom;
+      const screenLosPoly = cv.losPoly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
+      const grad = targetCtx.createRadialGradient(sx, sy, fullSr * 0.84, sx, sy, fullSr);
+      grad.addColorStop(0, 'rgba(0, 0, 0, 1)');
+      grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      targetCtx.fillStyle = grad;
+      traceRayPolygonPath(targetCtx, sx, sy, screenLosPoly, true);
+      targetCtx.fill();
+    } else {
+      const sr = cv.radiusPx * uiState.camZoom;
+      const screenPoly = cv.poly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
+      const grad = targetCtx.createRadialGradient(sx, sy, sr * innerSoftFrac, sx, sy, sr);
+      grad.addColorStop(0, 'rgba(0, 0, 0, 1)');
+      grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      targetCtx.fillStyle = grad;
+      traceRayPolygonPath(targetCtx, sx, sy, screenPoly, true);
+      targetCtx.fill();
+    }
+  });
+
+  lightSources.forEach(src => {
+    const unclippedFt = src.dimOnly ? src.radiusFt : src.radiusFt * 2;
+    const effMaxFt = (src.maxReachFt && src.maxReachFt > 0) ? Math.min(unclippedFt, src.maxReachFt) : unclippedFt;
+    const maxPx = (effMaxFt / 5) * gs;
+    const sx = src.wx * uiState.camZoom + uiState.camX;
+    const sy = src.wy * uiState.camZoom + uiState.camY;
+    const sr = maxPx * uiState.camZoom;
+    const poly = computeVisibilityPolygon(src.wx, src.wy, maxPx, blockingWalls, src.angleDeg, src.facingDeg);
+    const screenPoly = poly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
+    const grad = targetCtx.createRadialGradient(sx, sy, sr * 0.28, sx, sy, sr);
+    grad.addColorStop(0, 'rgba(0, 0, 0, 1)');
+    grad.addColorStop(0.72, 'rgba(0, 0, 0, 0.92)');
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    targetCtx.fillStyle = grad;
+    traceRayPolygonPath(targetCtx, sx, sy, screenPoly, src.angleDeg >= 359.5);
+    targetCtx.fill();
+  });
+
+  targetCtx.restore();
+}
+
+function drawScrollingSmokeFill(targetCtx, w, h, nowMs, zoom, camX, camY) {
+  if (!fogSmokePattern) {
+    fogSmokePattern = targetCtx.createPattern(fogSmokeTileCanvas, 'repeat');
+  }
+  if (!fogSmokePattern) return;
+  const s = fogSmokeTileSize;
+
+  // Layer 1: Primary drifting mist (world-anchored + slow NE drift)
+  targetCtx.save();
+  targetCtx.globalAlpha = 0.88;
+  const drift1X = ((camX + nowMs * 0.011 * zoom) % (s * zoom));
+  const drift1Y = ((camY - nowMs * 0.007 * zoom) % (s * zoom));
+  targetCtx.translate(drift1X, drift1Y);
+  targetCtx.scale(zoom, zoom);
+  targetCtx.fillStyle = fogSmokePattern;
+  const pad = s * 2;
+  targetCtx.fillRect(-pad, -pad, (w / zoom) + pad * 2, (h / zoom) + pad * 2);
+  targetCtx.restore();
+
+  // Layer 2: Secondary larger billowing mist (counter-drift SW for depth)
+  targetCtx.save();
+  targetCtx.globalAlpha = 0.58;
+  const z2 = zoom * 1.45;
+  const drift2X = ((camX - nowMs * 0.008 * z2) % (s * z2));
+  const drift2Y = ((camY + nowMs * 0.005 * z2) % (s * z2));
+  targetCtx.translate(drift2X, drift2Y);
+  targetCtx.scale(z2, z2);
+  targetCtx.fillStyle = fogSmokePattern;
+  targetCtx.fillRect(-pad, -pad, (w / z2) + pad * 2, (h / z2) + pad * 2);
+  targetCtx.restore();
+}
+
+function getSegmentBoundaryEdgesFromZones(scene, gs) {
+  const zones = typeof getTerrainZonesForScene === 'function' ? getTerrainZonesForScene(scene) : [];
+  const edges = [];
+  zones.forEach(z => {
+    if (IS_PLAYER_WINDOW && z.hiddenFromPlayers) return;
+    const zElev = clampElevationFt(z.elevationFt);
+    if (zElev === 0) return;
+    const x1 = Math.min(z.gx1, z.gx2) * gs;
+    const x2 = (Math.max(z.gx1, z.gx2) + 1) * gs;
+    const y1 = Math.min(z.gy1, z.gy2) * gs;
+    const y2 = (Math.max(z.gy1, z.gy2) + 1) * gs;
+    edges.push({ x1, y1, x2, y1, zHeight: zElev });
+    edges.push({ x2, y1, x2, y2, zHeight: zElev });
+    edges.push({ x2, y2, x1, y2, zHeight: zElev });
+    edges.push({ x1, y2, x1, y1, zHeight: zElev });
+  });
+  return edges;
+}
+
+function hasLineOfSightBetweenPoints(x1, y1, x2, y2, blockingWalls, z1 = 0, z2 = 0, scene = null, gs = 56) {
   const dx = x2 - x1;
   const dy = y2 - y1;
   const dist = Math.hypot(dx, dy);
   if (dist < 1e-4) return true;
   const rdx = dx / dist;
   const rdy = dy / dist;
-  for (let i = 0; i < blockingWalls.length; i++) {
-    const w = blockingWalls[i];
-    const t = raySegmentIntersect(x1, y1, rdx, rdy, w.x1, w.y1, w.x2, w.y2);
-    if (t !== null && t < dist - 0.5) return false;
+
+  if (blockingWalls && blockingWalls.length > 0) {
+    for (let i = 0; i < blockingWalls.length; i++) {
+      const w = blockingWalls[i];
+      const t = raySegmentIntersect(x1, y1, rdx, rdy, w.x1, w.y1, w.x2, w.y2);
+      if (t !== null && t < dist - 0.5) {
+        const wElev = Number(w.wallHeightFt) || 0;
+        if (wElev > 0) {
+          const rayZAtWall = (Number(z1) || 0) + ((Number(z2) || 0) - (Number(z1) || 0)) * (t / dist);
+          if (rayZAtWall >= wElev) continue;
+        }
+        return false;
+      }
+    }
   }
+
+  // 2.5D Elevation Rim / Edge Occlusion (5ft steps):
+  // If a ray crosses a raised/lowered zone boundary, compare interpolated ray height against the step height.
+  if (scene && (Math.abs((Number(z1) || 0) - (Number(z2) || 0)) > 0 || (scene.terrainZones && scene.terrainZones.length > 0))) {
+    const stepEdges = getSegmentBoundaryEdgesFromZones(scene, gs);
+    for (let e = 0; e < stepEdges.length; e++) {
+      const ed = stepEdges[e];
+      const t = raySegmentIntersect(x1, y1, rdx, rdy, ed.x1, ed.y1, ed.x2, ed.y2);
+      if (t !== null && t > 1.5 && t < dist - 1.5) {
+        const rayZ = (Number(z1) || 0) + ((Number(z2) || 0) - (Number(z1) || 0)) * (t / dist);
+        const rimZ = ed.zHeight;
+        // High viewer away from edge looking down into a low spot near the rim can be lip-occluded
+        if (rimZ > 0 && (Number(z1) || 0) >= rimZ && rayZ < rimZ - 1e-6) {
+          return false;
+        }
+        // Low viewer inside a sunken pit looking up over a rim can be blocked by rim height
+        if (rimZ < 0 && (Number(z1) || 0) <= rimZ && rayZ < 0) {
+          return false;
+        }
+      }
+    }
+  }
+
   return true;
 }
 
@@ -347,7 +561,11 @@ function computeReachableGridMap(startGx, startGy, maxFt, scene) {
       { gx: cur.gx + 1, gy: cur.gy },
       { gx: cur.gx - 1, gy: cur.gy },
       { gx: cur.gx, gy: cur.gy + 1 },
-      { gx: cur.gx, gy: cur.gy - 1 }
+      { gx: cur.gx, gy: cur.gy - 1 },
+      { gx: cur.gx + 1, gy: cur.gy + 1 },
+      { gx: cur.gx + 1, gy: cur.gy - 1 },
+      { gx: cur.gx - 1, gy: cur.gy + 1 },
+      { gx: cur.gx - 1, gy: cur.gy - 1 }
     ];
     for (let i = 0; i < neighbors.length; i++) {
       const nb = neighbors[i];
@@ -707,11 +925,181 @@ function renderActiveVfxLayer(ctx, scene, gs, nowMs) {
     }
   }
 
-  // Persistent Glowy Shield Dome on any token with active Shield Pips
-  (scene.tokens || []).forEach(tok => {
+  // Persistent Spell & Skill Effects (Walls, Ground Zones, Cones, Auras)
+  const pEffects = Array.isArray(scene.persistentEffects) ? scene.persistentEffects : [];
+  if (pEffects.length > 0) {
+    const tSec = nowMs * 0.001;
+    pEffects.forEach((pe, peIdx) => {
+      let cx = (pe.gx + 0.5) * gs;
+      let cy = (pe.gy + 0.5) * gs;
+      if (pe.attachToTokenId) {
+        const hostTok = (scene.tokens || []).find(t => t.id === pe.attachToTokenId);
+        if (!hostTok || (IS_PLAYER_WINDOW && hostTok.role === 'mob' && hostTok.hiddenFromPlayers)) return;
+        const visP = getTokenVisualGridPos(hostTok, nowMs);
+        cx = (visP.gx + 0.5) * gs;
+        cy = (visP.gy + 0.5) * gs;
+      }
+      const col = pe.vfxColor || '#f97316';
+      const radPx = Math.max(gs * 0.65, ((Number(pe.radiusFt) || 10) / 5) * gs);
+      const pulse = 0.86 + Math.sin(tSec * 2.8 + peIdx) * 0.14;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+
+      if (pe.shape === 'wall') {
+        // Wall of Fire / Flamewall / Static Conduit / Rampart strip perpendicular to caster->target
+        const sWx = ((pe.srcGx ?? pe.gx) + 0.5) * gs;
+        const sWy = ((pe.srcGy ?? pe.gy) + 0.5) * gs;
+        const baseAng = (cx === sWx && cy === sWy) ? 0 : Math.atan2(cy - sWy, cx - sWx) + Math.PI / 2;
+        const halfLen = Math.max(gs * 1.2, radPx * 0.5);
+        const x1 = cx - Math.cos(baseAng) * halfLen;
+        const y1 = cy - Math.sin(baseAng) * halfLen;
+        const x2 = cx + Math.cos(baseAng) * halfLen;
+        const y2 = cy + Math.sin(baseAng) * halfLen;
+
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = hexToRgba(col, 0.32 * pulse);
+        ctx.lineWidth = gs * 0.52;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        ctx.strokeStyle = hexToRgba(col, 0.85 * pulse);
+        ctx.lineWidth = gs * 0.2;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        ctx.strokeStyle = hexToRgba('#ffffff', 0.85 * pulse);
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        // Flickering flames / sparks dancing along the wall
+        const nodes = Math.max(5, Math.floor((halfLen * 2) / 18));
+        for (let k = 0; k <= nodes; k++) {
+          const ft = k / nodes;
+          const fx = x1 + (x2 - x1) * ft + Math.sin(tSec * 7 + k * 2.1) * 4;
+          const fy = y1 + (y2 - y1) * ft - Math.abs(Math.sin(tSec * 5 + k * 1.7)) * 12;
+          ctx.fillStyle = hexToRgba(k % 2 === 0 ? '#ffffff' : col, 0.85);
+          ctx.beginPath();
+          ctx.arc(fx, fy, 3.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (pe.shape === 'cone') {
+        // Persistent Cone (e.g. Web)
+        const sWx = ((pe.srcGx ?? pe.gx) + 0.5) * gs;
+        const sWy = ((pe.srcGy ?? pe.gy) + 0.5) * gs;
+        const dirAng = (cx === sWx && cy === sWy) ? 0 : Math.atan2(cy - sWy, cx - sWx);
+        const halfArc = Math.PI / 6;
+        ctx.beginPath();
+        ctx.moveTo(sWx, sWy);
+        ctx.arc(sWx, sWy, radPx, dirAng - halfArc, dirAng + halfArc);
+        ctx.closePath();
+        ctx.fillStyle = hexToRgba(col, 0.22 * pulse);
+        ctx.fill();
+        ctx.strokeStyle = hexToRgba(col, 0.78 * pulse);
+        ctx.lineWidth = 2.2;
+        ctx.setLineDash([7, 5]);
+        ctx.lineDashOffset = -tSec * 14;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (pe.shape === 'aura') {
+        // Token-attached Aura / Protective Shell / Wisp Armor / Oakhide
+        const auraR = Math.max(gs * 0.58, radPx);
+        const grad = ctx.createRadialGradient(cx, cy, auraR * 0.25, cx, cy, auraR);
+        grad.addColorStop(0, hexToRgba(col, 0.04));
+        grad.addColorStop(0.75, hexToRgba(col, 0.16 * pulse));
+        grad.addColorStop(1, hexToRgba(col, 0.36 * pulse));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, auraR, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = hexToRgba(col, 0.82 * pulse);
+        ctx.lineWidth = 2.2;
+        ctx.setLineDash([9, 6]);
+        ctx.lineDashOffset = -tSec * 18;
+        ctx.beginPath();
+        ctx.arc(cx, cy, auraR, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        for (let m = 0; m < 4; m++) {
+          const a = tSec * 1.6 + (Math.PI * 2 * m) / 4 + peIdx;
+          ctx.fillStyle = hexToRgba('#ffffff', 0.85);
+          ctx.beginPath();
+          ctx.arc(cx + Math.cos(a) * auraR, cy + Math.sin(a) * auraR, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // Persistent Ground Zone Circle (Fog, Storm, Vortex, Whirlpool, Miasma, Brambles, Rain, Hole)
+        const grad = ctx.createRadialGradient(cx, cy, radPx * 0.1, cx, cy, radPx);
+        grad.addColorStop(0, hexToRgba(col, 0.34 * pulse));
+        grad.addColorStop(0.65, hexToRgba(col, 0.2 * pulse));
+        grad.addColorStop(1, hexToRgba(col, 0.04));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radPx, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = hexToRgba(col, 0.8 * pulse);
+        ctx.lineWidth = 2.4;
+        ctx.setLineDash([10, 6]);
+        ctx.lineDashOffset = -tSec * 20;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radPx, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Swirling interior motes
+        const moteCount = 8;
+        for (let m = 0; m < moteCount; m++) {
+          const a = tSec * (1.2 + (m % 2) * 0.6) + (Math.PI * 2 * m) / moteCount;
+          const dist = radPx * (0.28 + ((m * 0.17) % 0.62));
+          ctx.fillStyle = hexToRgba(m % 3 === 0 ? '#ffffff' : col, 0.78);
+          ctx.beginPath();
+          ctx.arc(cx + Math.cos(a) * dist, cy + Math.sin(a) * dist, 2.8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // Subtle label pill for persistent zone (skip on tiny self-auras so token nameplate stays clean)
+      if (pe.shape !== 'aura' || pe.radiusFt >= 10) {
+        ctx.globalCompositeOperation = 'source-over';
+        const tag = `${pe.name} (${pe.remainingRounds < 0 ? '∞' : `${pe.remainingRounds}r`})`;
+        ctx.font = 'bold 9.5px JetBrains Mono, monospace';
+        const tw = ctx.measureText(tag).width + 10;
+        const ly = pe.shape === 'cone' ? ((pe.srcGy ?? pe.gy) + 0.5) * gs - 18 : cy - (pe.shape === 'wall' ? 18 : radPx * 0.45);
+        ctx.fillStyle = 'rgba(7, 9, 14, 0.85)';
+        ctx.strokeStyle = hexToRgba(col, 0.85);
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.roundRect(cx - tw / 2, ly - 8, tw, 16, 5);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#f8fafc';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(tag, cx, ly);
+      }
+
+      ctx.restore();
+    });
+  }
+
+  // Persistent Glowy Shield Dome & Buff Aura Animation on Tokens with Active Shields or Buffs
+  (scene.tokens || []).forEach((tok, tIdx) => {
     if (IS_PLAYER_WINDOW && tok.role === 'mob' && tok.hiddenFromPlayers) return;
     const shields = Math.max(0, Number(tok.shieldPips) || 0);
-    if (shields <= 0) return;
+    const buffs = Array.isArray(tok.buffs) ? tok.buffs : (Array.isArray(tok.activeBuffs) ? tok.activeBuffs : []);
+    const hasBuff = buffs.length > 0;
+    if (shields <= 0 && !hasBuff) return;
+
     const span = Math.max(1, Math.min(4, Number(tok.gridSpan) || 1));
     const vis = getTokenVisualGridPos(tok, nowMs);
     const drawGx = vis.gx;
@@ -720,38 +1108,72 @@ function renderActiveVfxLayer(ctx, scene, gs, nowMs) {
     const cy = (drawGy + 0.5) * gs;
     const domeR = gs * span * 0.47;
     const tSec = nowMs * 0.001;
-    const pulse = 0.85 + Math.sin(tSec * 3.4) * 0.15;
 
     ctx.save();
-    const grad = ctx.createRadialGradient(cx, cy, domeR * 0.2, cx, cy, domeR * 1.15);
-    grad.addColorStop(0, 'rgba(56, 189, 248, 0.04)');
-    grad.addColorStop(0.75, `rgba(56, 189, 248, ${0.18 * pulse})`);
-    grad.addColorStop(1, `rgba(186, 230, 253, ${0.42 * pulse})`);
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, domeR * 1.12, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
 
-    // Orbiting hex/sparkle shield motes
-    ctx.strokeStyle = `rgba(125, 211, 252, ${0.75 * pulse})`;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([8, 6]);
-    ctx.lineDashOffset = -tSec * 22;
-    ctx.beginPath();
-    ctx.arc(cx, cy, domeR * 1.08, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    const moteCount = Math.min(6, Math.max(2, shields));
-    for (let m = 0; m < moteCount; m++) {
-      const a = tSec * 1.8 + (Math.PI * 2 * m) / moteCount;
-      const mx = cx + Math.cos(a) * domeR * 1.08;
-      const my = cy + Math.sin(a) * domeR * 1.08;
-      ctx.fillStyle = '#e0f2fe';
+    if (hasBuff) {
+      const bPulse = 0.84 + Math.sin(tSec * 2.5 + tIdx) * 0.16;
+      const bCol = '#10b981';
+      const bGrad = ctx.createRadialGradient(cx, cy, domeR * 0.2, cx, cy, domeR * 1.18);
+      bGrad.addColorStop(0, hexToRgba(bCol, 0.03));
+      bGrad.addColorStop(0.75, hexToRgba(bCol, 0.14 * bPulse));
+      bGrad.addColorStop(1, hexToRgba(bCol, 0.30 * bPulse));
+      ctx.fillStyle = bGrad;
       ctx.beginPath();
-      ctx.arc(mx, my, 2.6, 0, Math.PI * 2);
+      ctx.arc(cx, cy, domeR * 1.14, 0, Math.PI * 2);
       ctx.fill();
+
+      ctx.strokeStyle = hexToRgba(bCol, 0.68 * bPulse);
+      ctx.lineWidth = 1.8;
+      ctx.setLineDash([7, 6]);
+      ctx.lineDashOffset = -tSec * 16;
+      ctx.beginPath();
+      ctx.arc(cx, cy, domeR * 1.12, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      for (let m = 0; m < 3; m++) {
+        const a = tSec * 1.4 + (Math.PI * 2 * m) / 3 + tIdx;
+        ctx.fillStyle = hexToRgba('#a7f3d0', 0.82 * bPulse);
+        ctx.beginPath();
+        ctx.arc(cx + Math.cos(a) * domeR * 1.12, cy + Math.sin(a) * domeR * 1.12, 2.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
+
+    if (shields > 0) {
+      const pulse = 0.85 + Math.sin(tSec * 3.4 + tIdx) * 0.15;
+      const grad = ctx.createRadialGradient(cx, cy, domeR * 0.2, cx, cy, domeR * 1.15);
+      grad.addColorStop(0, 'rgba(56, 189, 248, 0.04)');
+      grad.addColorStop(0.75, `rgba(56, 189, 248, ${0.18 * pulse})`);
+      grad.addColorStop(1, `rgba(186, 230, 253, ${0.42 * pulse})`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, domeR * 1.12, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = `rgba(125, 211, 252, ${0.75 * pulse})`;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 6]);
+      ctx.lineDashOffset = -tSec * 22;
+      ctx.beginPath();
+      ctx.arc(cx, cy, domeR * 1.08, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const moteCount = Math.min(6, Math.max(2, shields));
+      for (let m = 0; m < moteCount; m++) {
+        const a = tSec * 1.8 + (Math.PI * 2 * m) / moteCount;
+        const mx = cx + Math.cos(a) * domeR * 1.08;
+        const my = cy + Math.sin(a) * domeR * 1.08;
+        ctx.fillStyle = '#e0f2fe';
+        ctx.beginPath();
+        ctx.arc(mx, my, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
     ctx.restore();
   });
 
@@ -876,10 +1298,7 @@ function renderActiveVfxLayer(ctx, scene, gs, nowMs) {
       const dx = endX - v.sx;
       const dy = endY - v.sy;
       const dist = Math.hypot(dx, dy) || 1;
-      const nx = -dy / dist;
-      const ny = dx / dist;
       const segments = Math.max(6, Math.min(22, Math.floor(dist / 16)));
-      // Re-randomize bolt jitter every ~45ms so it visibly crackles and dances
       const tick = Math.floor(elapsed / 45);
       const hashJitter = (seed) => {
         const s = Math.sin(seed * 127.1 + tick * 311.7) * 43758.5453;
@@ -897,22 +1316,19 @@ function renderActiveVfxLayer(ctx, scene, gs, nowMs) {
           const t = s / segments;
           const env = Math.sin(t * Math.PI);
           const off = hashJitter(s + seedOffset) * amp * env;
-          pts.push({
-            x: sx + bdx * t + bnx * off,
-            y: sy + bdy * t + bny * off
-          });
+          pts.push({ x: sx + bdx * t + bnx * off, y: sy + bdy * t + bny * off });
         }
         pts.push({ x: ex, y: ey });
 
-        ctx.strokeStyle = hexToRgba(col, 0.42 * alpha);
-        ctx.lineWidth = lineW * 3.2;
+        ctx.strokeStyle = hexToRgba(col, 0.45 * alpha);
+        ctx.lineWidth = lineW * 3.4;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         ctx.beginPath();
         pts.forEach((pt, idx) => idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
         ctx.stroke();
 
-        ctx.strokeStyle = hexToRgba('#ffffff', 0.95 * alpha);
+        ctx.strokeStyle = hexToRgba('#ffffff', 0.96 * alpha);
         ctx.lineWidth = lineW;
         ctx.beginPath();
         pts.forEach((pt, idx) => idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
@@ -921,31 +1337,19 @@ function renderActiveVfxLayer(ctx, scene, gs, nowMs) {
       };
 
       const mainPts = drawJaggedBolt(v.sx, v.sy, endX, endY, gs * 0.34, 3.2, fade, 1);
-      // Secondary crackling twin strand
-      drawJaggedBolt(v.sx, v.sy, endX, endY, gs * 0.46, 1.5, fade * 0.75, 41);
+      drawJaggedBolt(v.sx, v.sy, endX, endY, gs * 0.48, 1.5, fade * 0.78, 41);
 
-      // Forked branch shooting off mid-bolt
       if (mainPts.length > 4) {
         const branchIdx = Math.floor(mainPts.length * 0.55);
         const bp = mainPts[branchIdx];
         const forkAngle = Math.atan2(dy, dx) + hashJitter(99) * 0.75;
         const forkLen = Math.min(dist * 0.45, gs * 1.4);
-        drawJaggedBolt(
-          bp.x,
-          bp.y,
-          bp.x + Math.cos(forkAngle) * forkLen,
-          bp.y + Math.sin(forkAngle) * forkLen,
-          gs * 0.18,
-          1.4,
-          fade * 0.85,
-          77
-        );
+        drawJaggedBolt(bp.x, bp.y, bp.x + Math.cos(forkAngle) * forkLen, bp.y + Math.sin(forkAngle) * forkLen, gs * 0.18, 1.4, fade * 0.85, 77);
       }
 
-      // Electric arc ring & crackling sparks around target
       const arcR = targetRadius * (0.7 + 0.45 * Math.abs(hashJitter(13)));
-      ctx.strokeStyle = hexToRgba(col, 0.75 * fade);
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = hexToRgba(col, 0.8 * fade);
+      ctx.lineWidth = 2.2;
       ctx.beginPath();
       ctx.arc(v.dx, v.dy, arcR, 0, Math.PI * 2);
       ctx.stroke();
@@ -961,166 +1365,432 @@ function renderActiveVfxLayer(ctx, scene, gs, nowMs) {
         ctx.fill();
       });
     } else if (v.vfxType === 'beam') {
-      const beamProgress = Math.min(1, p * 2.4);
+      // High-energy laser / lance beam with muzzle flash, helical energy ribbon & impact shock-cone
+      const beamProgress = Math.min(1, p * 2.8);
       const bx = v.sx + (v.dx - v.sx) * beamProgress;
       const by = v.sy + (v.dy - v.sy) * beamProgress;
-      ctx.strokeStyle = hexToRgba(col, 0.35 * fade);
-      ctx.lineWidth = 14 * (1 - p * 0.4);
+      const bdx = bx - v.sx;
+      const bdy = by - v.sy;
+      const bdist = Math.hypot(bdx, bdy) || 1;
+      const nx = -bdy / bdist;
+      const ny = bdx / bdist;
+
+      // Muzzle flash ring at caster
+      const muzR = gs * (0.18 + 0.24 * Math.sin(Math.min(1, p * 2) * Math.PI));
+      ctx.strokeStyle = hexToRgba(col, 0.8 * fade);
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(v.sx, v.sy, muzR, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Wide outer bloom + mid beam + hot white core
       ctx.lineCap = 'round';
+      ctx.strokeStyle = hexToRgba(col, 0.28 * fade);
+      ctx.lineWidth = (20 + Math.sin(p * 28) * 3) * (1 - p * 0.35);
       ctx.beginPath();
       ctx.moveTo(v.sx, v.sy);
       ctx.lineTo(bx, by);
       ctx.stroke();
 
-      ctx.strokeStyle = hexToRgba('#ffffff', 0.9 * fade);
-      ctx.lineWidth = 4 * (1 - p * 0.5);
+      ctx.strokeStyle = hexToRgba(col, 0.72 * fade);
+      ctx.lineWidth = 9 * (1 - p * 0.4);
       ctx.beginPath();
       ctx.moveTo(v.sx, v.sy);
       ctx.lineTo(bx, by);
       ctx.stroke();
 
-      v.particles.forEach(pt => {
-        const px = v.dx + Math.cos(pt.ang) * pt.speed * p * 0.9;
-        const py = v.dy + Math.sin(pt.ang) * pt.speed * p * 0.9;
-        ctx.fillStyle = hexToRgba(col, fade);
+      ctx.strokeStyle = hexToRgba('#ffffff', 0.96 * fade);
+      ctx.lineWidth = 3.5 * (1 - p * 0.45);
+      ctx.beginPath();
+      ctx.moveTo(v.sx, v.sy);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+
+      // Helical energy ribbon spiraling along the beam
+      const helixSteps = Math.max(10, Math.min(36, Math.floor(bdist / 10)));
+      ctx.strokeStyle = hexToRgba(col, 0.85 * fade);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let s = 0; s <= helixSteps; s++) {
+        const t = s / helixSteps;
+        const wave = Math.sin(t * Math.PI * 6 - p * 24) * gs * 0.16 * Math.sin(t * Math.PI);
+        const hx = v.sx + bdx * t + nx * wave;
+        const hy = v.sy + bdy * t + ny * wave;
+        if (s === 0) ctx.moveTo(hx, hy);
+        else ctx.lineTo(hx, hy);
+      }
+      ctx.stroke();
+
+      // Impact flare & directional sparks at target
+      if (beamProgress >= 0.85) {
+        const impP = Math.min(1, (p - 0.28) / 0.72);
+        const impR = targetRadius * (0.45 + impP * 0.85);
+        const grad = ctx.createRadialGradient(v.dx, v.dy, 1, v.dx, v.dy, impR);
+        grad.addColorStop(0, hexToRgba('#ffffff', 0.9 * fade));
+        grad.addColorStop(0.5, hexToRgba(col, 0.55 * fade));
+        grad.addColorStop(1, hexToRgba(col, 0));
+        ctx.fillStyle = grad;
         ctx.beginPath();
-        ctx.arc(px, py, pt.size * (1 - p * 0.5), 0, Math.PI * 2);
+        ctx.arc(v.dx, v.dy, impR, 0, Math.PI * 2);
         ctx.fill();
-      });
+
+        v.particles.forEach((pt, idx) => {
+          const px = v.dx + Math.cos(pt.ang) * pt.speed * impP * 1.05;
+          const py = v.dy + Math.sin(pt.ang) * pt.speed * impP * 1.05;
+          ctx.fillStyle = hexToRgba(idx % 3 === 0 ? '#ffffff' : col, fade);
+          ctx.beginPath();
+          ctx.arc(px, py, pt.size * (1 - impP * 0.45), 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
     } else if (v.vfxType === 'projectile') {
-      // Sharp directional bolt / lance streak with tapered tail & impact sparks
-      const travel = Math.min(1, p * 2.1);
-      const tailTravel = Math.max(0, travel - 0.35);
+      // Blazing comet bolt with spinning star core, flickering ember tail & multi-ring impact detonation
+      const travel = Math.min(1, p * 2.15);
+      const tailTravel = Math.max(0, travel - 0.42);
       const headX = v.sx + (v.dx - v.sx) * travel;
       const headY = v.sy + (v.dy - v.sy) * travel;
       const tailX = v.sx + (v.dx - v.sx) * tailTravel;
       const tailY = v.sy + (v.dy - v.sy) * tailTravel;
-      const impactP = p > 0.48 ? (p - 0.48) / 0.52 : 0;
+      const impactP = p > 0.46 ? (p - 0.46) / 0.54 : 0;
 
       if (travel < 1) {
-        ctx.strokeStyle = hexToRgba(col, 0.75 * fade);
-        ctx.lineWidth = 8;
+        const grad = ctx.createLinearGradient(tailX, tailY, headX, headY);
+        grad.addColorStop(0, hexToRgba(col, 0));
+        grad.addColorStop(0.7, hexToRgba(col, 0.78 * fade));
+        grad.addColorStop(1, hexToRgba('#ffffff', 0.98 * fade));
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 10;
         ctx.lineCap = 'round';
         ctx.beginPath();
         ctx.moveTo(tailX, tailY);
         ctx.lineTo(headX, headY);
         ctx.stroke();
 
-        ctx.strokeStyle = hexToRgba('#ffffff', 0.95 * fade);
-        ctx.lineWidth = 3;
+        // Spinning 4-point star head
+        const starR = 9;
+        ctx.save();
+        ctx.translate(headX, headY);
+        ctx.rotate(p * 18);
+        ctx.fillStyle = '#ffffff';
         ctx.beginPath();
-        ctx.moveTo(tailX, tailY);
-        ctx.lineTo(headX, headY);
-        ctx.stroke();
-      } else {
-        v.particles.forEach(pt => {
-          const px = v.dx + Math.cos(pt.ang) * pt.speed * impactP * 0.85;
-          const py = v.dy + Math.sin(pt.ang) * pt.speed * impactP * 0.85;
-          ctx.fillStyle = hexToRgba(col, fade);
+        for (let k = 0; k < 8; k++) {
+          const r = k % 2 === 0 ? starR : starR * 0.35;
+          const a = (Math.PI * k) / 4;
+          if (k === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+          else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        // Trailing ember sparks along flight path
+        for (let k = 0; k < 6; k++) {
+          const ft = tailTravel + (travel - tailTravel) * (k / 6);
+          const ex = v.sx + (v.dx - v.sx) * ft + Math.sin(p * 30 + k * 2.1) * 6;
+          const ey = v.sy + (v.dy - v.sy) * ft + Math.cos(p * 26 + k * 1.7) * 6;
+          ctx.fillStyle = hexToRgba(col, 0.75 * fade);
           ctx.beginPath();
-          ctx.arc(px, py, pt.size * (1 - impactP * 0.5), 0, Math.PI * 2);
+          ctx.arc(ex, ey, 2.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // Crisp 2-ring detonation + radial shrapnel
+        const ring1 = targetRadius * (0.35 + impactP * 1.25);
+        const ring2 = targetRadius * (0.2 + impactP * 0.8);
+        ctx.strokeStyle = hexToRgba(col, 0.9 * fade);
+        ctx.lineWidth = 3.5 * (1 - impactP * 0.6);
+        ctx.beginPath();
+        ctx.arc(v.dx, v.dy, ring1, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = hexToRgba('#ffffff', 0.85 * fade);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(v.dx, v.dy, ring2, 0, Math.PI * 2);
+        ctx.stroke();
+
+        v.particles.forEach((pt, idx) => {
+          const px = v.dx + Math.cos(pt.ang) * pt.speed * impactP * 1.05;
+          const py = v.dy + Math.sin(pt.ang) * pt.speed * impactP * 1.05;
+          ctx.fillStyle = hexToRgba(idx % 3 === 0 ? '#ffffff' : col, fade);
+          ctx.beginPath();
+          ctx.arc(px, py, pt.size * (1 - impactP * 0.45), 0, Math.PI * 2);
           ctx.fill();
         });
       }
     } else if (v.vfxType === 'burst') {
-      const blastR = targetRadius + gs * 1.45 * Math.pow(p, 0.65);
-      const grad = ctx.createRadialGradient(v.dx, v.dy, 2, v.dx, v.dy, blastR);
-      grad.addColorStop(0, hexToRgba('#ffffff', 0.75 * fade));
-      grad.addColorStop(0.45, hexToRgba(col, 0.55 * fade));
-      grad.addColorStop(1, hexToRgba(col, 0));
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(v.dx, v.dy, blastR, 0, Math.PI * 2);
-      ctx.fill();
+      // 3-Stage Cinematic Explosion: white flash -> billowing elemental cloud lobes -> dual shockwaves + embers
+      const easeOut = 1 - Math.pow(1 - p, 2.4);
+      const blastR = targetRadius + gs * 1.65 * easeOut;
 
-      ctx.strokeStyle = hexToRgba(col, 0.8 * fade);
-      ctx.lineWidth = 3;
+      // Billowing cloud lobes around center
+      const lobeCount = 7;
+      for (let l = 0; l < lobeCount; l++) {
+        const la = (Math.PI * 2 * l) / lobeCount + p * 0.5;
+        const ld = blastR * 0.36 * easeOut;
+        const lx = v.dx + Math.cos(la) * ld;
+        const ly = v.dy + Math.sin(la) * ld;
+        const lr = blastR * (0.48 + (l % 2) * 0.14);
+        const lGrad = ctx.createRadialGradient(lx, ly, 2, lx, ly, lr);
+        lGrad.addColorStop(0, hexToRgba('#ffffff', 0.42 * fade));
+        lGrad.addColorStop(0.42, hexToRgba(col, 0.48 * fade));
+        lGrad.addColorStop(1, hexToRgba(col, 0));
+        ctx.fillStyle = lGrad;
+        ctx.beginPath();
+        ctx.arc(lx, ly, lr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // White-hot core flash in first 35%
+      if (p < 0.4) {
+        const flashFade = 1 - p / 0.4;
+        const cGrad = ctx.createRadialGradient(v.dx, v.dy, 1, v.dx, v.dy, targetRadius * 1.2);
+        cGrad.addColorStop(0, hexToRgba('#ffffff', 0.95 * flashFade));
+        cGrad.addColorStop(1, hexToRgba(col, 0));
+        ctx.fillStyle = cGrad;
+        ctx.beginPath();
+        ctx.arc(v.dx, v.dy, targetRadius * 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Dual expanding shockwave rings
+      ctx.strokeStyle = hexToRgba(col, 0.9 * fade);
+      ctx.lineWidth = 4 * (1 - p * 0.55);
       ctx.beginPath();
-      ctx.arc(v.dx, v.dy, blastR * 0.88, 0, Math.PI * 2);
+      ctx.arc(v.dx, v.dy, blastR * 0.92, 0, Math.PI * 2);
       ctx.stroke();
 
-      v.particles.forEach(pt => {
-        const px = v.dx + Math.cos(pt.ang) * pt.speed * p * 1.25;
-        const py = v.dy + Math.sin(pt.ang) * pt.speed * p * 1.25;
-        ctx.fillStyle = hexToRgba(col, fade);
+      ctx.strokeStyle = hexToRgba('#ffffff', 0.65 * fade);
+      ctx.lineWidth = 2;
+      ctx.setLineDash([10, 6]);
+      ctx.beginPath();
+      ctx.arc(v.dx, v.dy, blastR * 0.64, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Embers & debris sparks
+      v.particles.forEach((pt, idx) => {
+        const px = v.dx + Math.cos(pt.ang) * pt.speed * p * 1.38;
+        const py = v.dy + Math.sin(pt.ang) * pt.speed * p * 1.38 - p * gs * 0.25;
+        ctx.fillStyle = hexToRgba(idx % 4 === 0 ? '#ffffff' : col, fade);
         ctx.beginPath();
         ctx.arc(px, py, pt.size * (1 - p * 0.35), 0, Math.PI * 2);
         ctx.fill();
       });
     } else if (v.vfxType === 'slash') {
-      const arcR = targetRadius * 1.15;
-      const sweep = -Math.PI * 0.75 + p * Math.PI * 1.35;
-      ctx.strokeStyle = hexToRgba(col, 0.85 * fade);
-      ctx.lineWidth = 7 * (1 - p * 0.5);
+      // Tapered glowing crescent blade-wave + cross-cut glint + directional hit sparks
+      const baseAng = Math.hypot(v.dx - v.sx, v.dy - v.sy) > 2 ? Math.atan2(v.dy - v.sy, v.dx - v.sx) : -Math.PI * 0.25;
+      const arcR = targetRadius * (1.1 + p * 0.35);
+      const sweepStart = baseAng - 1.35 + p * 0.6;
+      const sweepEnd = baseAng - 0.55 + p * 1.85;
+
+      // Outer energy crescent
+      ctx.strokeStyle = hexToRgba(col, 0.45 * fade);
+      ctx.lineWidth = 16 * (1 - p * 0.55);
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.arc(v.dx, v.dy, arcR, sweep - 0.8, sweep);
+      ctx.arc(v.dx, v.dy, arcR, sweepStart, sweepEnd);
       ctx.stroke();
 
-      ctx.strokeStyle = hexToRgba('#ffffff', 0.95 * fade);
-      ctx.lineWidth = 2.5;
+      // Main colored blade arc
+      ctx.strokeStyle = hexToRgba(col, 0.92 * fade);
+      ctx.lineWidth = 7 * (1 - p * 0.5);
       ctx.beginPath();
-      ctx.arc(v.dx, v.dy, arcR, sweep - 0.55, sweep);
+      ctx.arc(v.dx, v.dy, arcR, sweepStart + 0.15, sweepEnd);
       ctx.stroke();
 
-      v.particles.forEach(pt => {
-        const px = v.dx + Math.cos(pt.ang) * pt.speed * p * 0.8;
-        const py = v.dy + Math.sin(pt.ang) * pt.speed * p * 0.8;
-        ctx.fillStyle = hexToRgba(col, fade);
+      // Razor white edge
+      ctx.strokeStyle = hexToRgba('#ffffff', 0.98 * fade);
+      ctx.lineWidth = 2.6;
+      ctx.beginPath();
+      ctx.arc(v.dx, v.dy, arcR + 1.5, sweepStart + 0.25, sweepEnd);
+      ctx.stroke();
+
+      // Cross-cut impact star flash
+      if (p > 0.15 && p < 0.7) {
+        const xf = Math.sin(((p - 0.15) / 0.55) * Math.PI);
+        const len = targetRadius * 0.95 * xf;
+        ctx.strokeStyle = hexToRgba('#ffffff', 0.9 * xf);
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(v.dx - Math.cos(baseAng + 0.7) * len, v.dy - Math.sin(baseAng + 0.7) * len);
+        ctx.lineTo(v.dx + Math.cos(baseAng + 0.7) * len, v.dy + Math.sin(baseAng + 0.7) * len);
+        ctx.stroke();
+      }
+
+      v.particles.forEach((pt, idx) => {
+        const px = v.dx + Math.cos(pt.ang) * pt.speed * p * 0.95;
+        const py = v.dy + Math.sin(pt.ang) * pt.speed * p * 0.95;
+        ctx.fillStyle = hexToRgba(idx % 2 === 0 ? '#ffffff' : col, fade);
         ctx.beginPath();
         ctx.arc(px, py, pt.size * 0.85, 0, Math.PI * 2);
         ctx.fill();
       });
     } else if (v.vfxType === 'shield') {
-      const domeR = targetRadius * (0.65 + 0.55 * Math.min(1, p * 2));
-      const grad = ctx.createRadialGradient(v.dx, v.dy, domeR * 0.2, v.dx, v.dy, domeR * 1.2);
-      grad.addColorStop(0, hexToRgba(col, 0.08 * fade));
-      grad.addColorStop(0.7, hexToRgba(col, 0.45 * fade));
+      // Interlocking hexagonal rune-barrier dome + rotating geometric ward arcs
+      const domeR = targetRadius * (0.7 + 0.58 * Math.min(1, p * 2.2));
+      const grad = ctx.createRadialGradient(v.dx, v.dy, domeR * 0.15, v.dx, v.dy, domeR * 1.2);
+      grad.addColorStop(0, hexToRgba(col, 0.06 * fade));
+      grad.addColorStop(0.68, hexToRgba(col, 0.42 * fade));
       grad.addColorStop(1, hexToRgba('#ffffff', 0.85 * fade));
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.arc(v.dx, v.dy, domeR * 1.15, 0, Math.PI * 2);
       ctx.fill();
 
-      v.particles.forEach(pt => {
-        const a = pt.ang + p * 3.5;
-        const px = v.dx + Math.cos(a) * domeR * 1.1;
-        const py = v.dy + Math.sin(a) * domeR * 1.1;
-        ctx.fillStyle = hexToRgba('#ffffff', fade);
-        ctx.beginPath();
-        ctx.arc(px, py, pt.size * 0.9, 0, Math.PI * 2);
-        ctx.fill();
-      });
-    } else if (v.vfxType === 'heal' || v.vfxType === 'aura') {
-      const ringR = targetRadius * (0.75 + p * 0.55);
-      ctx.strokeStyle = hexToRgba(col, 0.75 * fade);
-      ctx.lineWidth = 3;
+      // Rotating hexagon lattice
+      ctx.save();
+      ctx.translate(v.dx, v.dy);
+      ctx.rotate(p * 1.6);
+      ctx.strokeStyle = hexToRgba('#ffffff', 0.75 * fade);
+      ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(v.dx, v.dy, ringR, 0, Math.PI * 2);
+      for (let h = 0; h < 6; h++) {
+        const ha = (Math.PI * 2 * h) / 6;
+        const hx = Math.cos(ha) * domeR * 0.92;
+        const hy = Math.sin(ha) * domeR * 0.92;
+        if (h === 0) ctx.moveTo(hx, hy);
+        else ctx.lineTo(hx, hy);
+      }
+      ctx.closePath();
       ctx.stroke();
+      ctx.restore();
+
+      // Counter-rotating segmented ward ring
+      ctx.strokeStyle = hexToRgba(col, 0.9 * fade);
+      ctx.lineWidth = 3;
+      ctx.setLineDash([12, 8]);
+      ctx.lineDashOffset = p * 55;
+      ctx.beginPath();
+      ctx.arc(v.dx, v.dy, domeR * 1.12, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
 
       v.particles.forEach(pt => {
-        const px = v.dx + pt.offsetX + Math.sin(p * 6 + pt.phase) * 5;
-        const py = v.dy + pt.offsetY - p * gs * 0.95;
-        ctx.fillStyle = hexToRgba(col, fade);
+        const a = pt.ang + p * 3.8;
+        const px = v.dx + Math.cos(a) * domeR * 1.12;
+        const py = v.dy + Math.sin(a) * domeR * 1.12;
+        ctx.fillStyle = hexToRgba('#ffffff', fade);
+        ctx.beginPath();
+        ctx.arc(px, py, pt.size * 0.85, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    } else if (v.vfxType === 'heal') {
+      // Warm ground bloom + twin rising light ribbons + floating glowing "+" healing crosses
+      const ringR = targetRadius * (0.75 + p * 0.65);
+      const gGrad = ctx.createRadialGradient(v.dx, v.dy, 2, v.dx, v.dy, ringR);
+      gGrad.addColorStop(0, hexToRgba('#ffffff', 0.45 * fade));
+      gGrad.addColorStop(0.55, hexToRgba(col, 0.35 * fade));
+      gGrad.addColorStop(1, hexToRgba(col, 0));
+      ctx.fillStyle = gGrad;
+      ctx.beginPath();
+      ctx.arc(v.dx, v.dy, ringR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Twin rising spiral ribbons
+      for (let rIdx = 0; rIdx < 2; rIdx++) {
+        ctx.strokeStyle = hexToRgba(rIdx === 0 ? col : '#ffffff', 0.85 * fade);
+        ctx.lineWidth = 2.6;
+        ctx.beginPath();
+        for (let s = 0; s <= 18; s++) {
+          const t = s / 18;
+          const ang = t * Math.PI * 3 + p * 8 + rIdx * Math.PI;
+          const rx = v.dx + Math.cos(ang) * targetRadius * (0.85 - t * 0.25);
+          const ry = v.dy + targetRadius * 0.35 - t * gs * 1.35 * Math.min(1, p * 1.6);
+          if (s === 0) ctx.moveTo(rx, ry);
+          else ctx.lineTo(rx, ry);
+        }
+        ctx.stroke();
+      }
+
+      // Floating "+" sparkles
+      v.particles.slice(0, 14).forEach((pt, idx) => {
+        const px = v.dx + pt.offsetX * 1.25 + Math.sin(p * 6 + pt.phase) * 5;
+        const py = v.dy + pt.offsetY * 0.7 - p * gs * 1.15;
+        const sz = 4.5 * (1 - p * 0.3);
+        ctx.strokeStyle = hexToRgba(idx % 2 === 0 ? '#ffffff' : col, fade);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(px - sz, py);
+        ctx.lineTo(px + sz, py);
+        ctx.moveTo(px, py - sz);
+        ctx.lineTo(px, py + sz);
+        ctx.stroke();
+      });
+    } else if (v.vfxType === 'aura') {
+      // Rotating arcane glyph / rune ring + shimmering upward motes
+      const ringR = targetRadius * (0.85 + p * 0.45);
+      ctx.save();
+      ctx.translate(v.dx, v.dy);
+      ctx.rotate(p * 2.4);
+      ctx.strokeStyle = hexToRgba(col, 0.85 * fade);
+      ctx.lineWidth = 2.6;
+      ctx.beginPath();
+      ctx.arc(0, 0, ringR, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = hexToRgba('#ffffff', 0.7 * fade);
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.arc(0, 0, ringR * 0.74, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 8 radial rune ticks
+      for (let t = 0; t < 8; t++) {
+        const a = (Math.PI * 2 * t) / 8;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * ringR * 0.76, Math.sin(a) * ringR * 0.76);
+        ctx.lineTo(Math.cos(a) * ringR * 1.06, Math.sin(a) * ringR * 1.06);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      v.particles.forEach((pt, idx) => {
+        const px = v.dx + pt.offsetX * 1.3 + Math.sin(p * 5 + pt.phase) * 6;
+        const py = v.dy + pt.offsetY - p * gs * 0.9;
+        ctx.fillStyle = hexToRgba(idx % 3 === 0 ? '#ffffff' : col, fade);
         ctx.beginPath();
         ctx.arc(px, py, pt.size * (1 - p * 0.35), 0, Math.PI * 2);
         ctx.fill();
       });
     } else if (v.vfxType === 'vortex') {
-      // Soul Drain / Curse spiral tendrils from target back to caster
-      const coreR = targetRadius * (1.1 - p * 0.45);
-      ctx.strokeStyle = hexToRgba(col, 0.8 * fade);
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(v.dx, v.dy, coreR, p * 6, p * 6 + Math.PI * 1.6);
-      ctx.stroke();
+      // Swirling dark-core maelstrom at target + 4 curved soul-siphon tendrils back to caster
+      const coreR = targetRadius * (1.2 - p * 0.4);
+      for (let arm = 0; arm < 3; arm++) {
+        const startA = p * 7 + (Math.PI * 2 * arm) / 3;
+        ctx.strokeStyle = hexToRgba(arm === 0 ? '#ffffff' : col, 0.85 * fade);
+        ctx.lineWidth = arm === 0 ? 2 : 3.2;
+        ctx.beginPath();
+        ctx.arc(v.dx, v.dy, coreR * (0.7 + arm * 0.16), startA, startA + Math.PI * 1.15);
+        ctx.stroke();
+      }
+
+      // 4 curved siphon ribbons traveling from target -> caster
+      const dist = Math.hypot(v.sx - v.dx, v.sy - v.dy) || 1;
+      const perpX = -(v.sy - v.dy) / dist;
+      const perpY = (v.sx - v.dx) / dist;
+      for (let r = 0; r < 4; r++) {
+        const side = r % 2 === 0 ? 1 : -1;
+        const amp = gs * (0.28 + r * 0.1) * side;
+        ctx.strokeStyle = hexToRgba(r === 0 ? '#ffffff' : col, 0.65 * fade);
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        for (let s = 0; s <= 16; s++) {
+          const t = (s / 16) * Math.min(1, p * 1.5);
+          const swirl = Math.sin(t * Math.PI * 2 + p * 10 + r) * amp * Math.sin(t * Math.PI);
+          const px = v.dx + (v.sx - v.dx) * t + perpX * swirl;
+          const py = v.dy + (v.sy - v.dy) * t + perpY * swirl;
+          if (s === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      }
 
       v.particles.forEach((pt, idx) => {
         const t = Math.min(1, Math.max(0, p * 1.25 - (idx % 6) * 0.04));
         const swirl = Math.sin(t * Math.PI * 2 + pt.phase) * gs * 0.35 * (1 - t);
-        const perpX = -(v.sy - v.dy) / (Math.hypot(v.sx - v.dx, v.sy - v.dy) || 1);
-        const perpY = (v.sx - v.dx) / (Math.hypot(v.sx - v.dx, v.sy - v.dy) || 1);
         const px = v.dx + (v.sx - v.dx) * t + perpX * swirl;
         const py = v.dy + (v.sy - v.dy) * t + perpY * swirl;
         ctx.fillStyle = hexToRgba(idx % 3 === 0 ? '#ffffff' : col, fade);
@@ -1129,17 +1799,30 @@ function renderActiveVfxLayer(ctx, scene, gs, nowMs) {
         ctx.fill();
       });
     } else if (v.vfxType === 'teleport') {
-      // Flash Step / Puddle Jumper / Air Buddy twin portal rings & streak
-      [ { x: v.sx, y: v.sy, r: targetRadius * (1.2 - p * 0.8) }, { x: v.dx, y: v.dy, r: targetRadius * (0.3 + p * 0.9) } ].forEach(ptl => {
-        ctx.strokeStyle = hexToRgba(col, 0.85 * fade);
-        ctx.lineWidth = 3.5;
+      // Collapsing origin portal + vertical blink pillar + erupting destination portal
+      const p1R = Math.max(4, targetRadius * (1.25 - p * 0.95));
+      const p2R = Math.max(4, targetRadius * (0.25 + p * 1.05));
+      [ { x: v.sx, y: v.sy, r: p1R }, { x: v.dx, y: v.dy, r: p2R } ].forEach((ptl, idx) => {
+        const g = ctx.createRadialGradient(ptl.x, ptl.y, 1, ptl.x, ptl.y, ptl.r * 1.2);
+        g.addColorStop(0, hexToRgba('#ffffff', 0.7 * fade));
+        g.addColorStop(0.5, hexToRgba(col, 0.45 * fade));
+        g.addColorStop(1, hexToRgba(col, 0));
+        ctx.fillStyle = g;
         ctx.beginPath();
-        ctx.arc(ptl.x, ptl.y, Math.max(4, ptl.r), 0, Math.PI * 2);
+        ctx.arc(ptl.x, ptl.y, ptl.r * 1.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = hexToRgba(idx === 0 ? col : '#ffffff', 0.9 * fade);
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(ptl.x, ptl.y, ptl.r, 0, Math.PI * 2);
         ctx.stroke();
       });
-      ctx.strokeStyle = hexToRgba('#ffffff', 0.55 * fade);
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 6]);
+
+      // Afterimage warp streak
+      ctx.strokeStyle = hexToRgba(col, 0.65 * fade);
+      ctx.lineWidth = 4 * (1 - p * 0.6);
+      ctx.setLineDash([8, 6]);
       ctx.beginPath();
       ctx.moveTo(v.sx, v.sy);
       ctx.lineTo(v.dx, v.dy);
@@ -1149,64 +1832,372 @@ function renderActiveVfxLayer(ctx, scene, gs, nowMs) {
       v.particles.forEach((pt, idx) => {
         const originX = idx % 2 === 0 ? v.sx : v.dx;
         const originY = idx % 2 === 0 ? v.sy : v.dy;
-        const px = originX + Math.cos(pt.ang) * pt.speed * p * 0.85;
-        const py = originY + Math.sin(pt.ang) * pt.speed * p * 0.85;
-        ctx.fillStyle = hexToRgba(col, fade);
+        const px = originX + Math.cos(pt.ang) * pt.speed * p * 0.9;
+        const py = originY + Math.sin(pt.ang) * pt.speed * p * 0.9;
+        ctx.fillStyle = hexToRgba(idx % 3 === 0 ? '#ffffff' : col, fade);
         ctx.beginPath();
         ctx.arc(px, py, pt.size * 0.85, 0, Math.PI * 2);
         ctx.fill();
       });
     } else if (v.vfxType === 'summon') {
-      // Ground eruption spikes / roots / minion glyph
-      const ringR = targetRadius * 1.15;
-      ctx.strokeStyle = hexToRgba(col, 0.85 * fade);
+      // Glowing summoning pentagram/star circle + jagged erupting ground spikes/roots + rising motes
+      const ringR = targetRadius * 1.2;
+      ctx.save();
+      ctx.translate(v.dx, v.dy);
+      ctx.rotate(p * 1.5);
+      ctx.strokeStyle = hexToRgba(col, 0.9 * fade);
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(v.dx, v.dy, ringR, 0, Math.PI * 2);
+      ctx.arc(0, 0, ringR, 0, Math.PI * 2);
       ctx.stroke();
 
-      const spikeCount = 7;
+      // Inner 5-point summoning star
+      ctx.strokeStyle = hexToRgba('#ffffff', 0.72 * fade);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      for (let i = 0; i <= 5; i++) {
+        const a = ((i * 2) % 5) * ((Math.PI * 2) / 5) - Math.PI / 2;
+        const sx = Math.cos(a) * ringR * 0.92;
+        const sy = Math.sin(a) * ringR * 0.92;
+        if (i === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      // Erupting jagged spikes / tendrils
+      const spikeCount = 8;
       for (let s = 0; s < spikeCount; s++) {
-        const a = (Math.PI * 2 * s) / spikeCount + p * 0.6;
-        const baseR = ringR * 0.55;
-        const tipR = ringR * (0.65 + Math.sin(p * Math.PI) * 0.75);
+        const a = (Math.PI * 2 * s) / spikeCount + p * 0.35;
+        const baseR = ringR * 0.42;
+        const tipR = ringR * (0.65 + Math.sin(p * Math.PI) * 0.85);
         ctx.strokeStyle = hexToRgba(s % 2 === 0 ? col : '#ffffff', fade);
-        ctx.lineWidth = 3.5;
+        ctx.lineWidth = 3.6 * (1 - p * 0.35);
+        ctx.lineCap = 'round';
         ctx.beginPath();
         ctx.moveTo(v.dx + Math.cos(a) * baseR, v.dy + Math.sin(a) * baseR);
         ctx.lineTo(v.dx + Math.cos(a) * tipR, v.dy + Math.sin(a) * tipR);
         ctx.stroke();
       }
 
-      v.particles.forEach(pt => {
-        const px = v.dx + pt.offsetX * 1.2;
-        const py = v.dy + pt.offsetY - p * gs * 0.7;
-        ctx.fillStyle = hexToRgba(col, fade);
+      v.particles.forEach((pt, idx) => {
+        const px = v.dx + pt.offsetX * 1.3;
+        const py = v.dy + pt.offsetY - p * gs * 0.85;
+        ctx.fillStyle = hexToRgba(idx % 3 === 0 ? '#ffffff' : col, fade);
         ctx.beginPath();
         ctx.arc(px, py, pt.size * 0.85, 0, Math.PI * 2);
         ctx.fill();
       });
     } else {
-      // nova shockwave ring
-      const ringR = targetRadius * 0.5 + gs * 1.6 * p;
-      ctx.strokeStyle = hexToRgba(col, 0.9 * fade);
-      ctx.lineWidth = 5 * (1 - p * 0.6);
+      // nova: Triple staggered concentric sonic / shockwave rings + radial crest sparks
+      const ring1 = targetRadius * 0.4 + gs * 1.75 * p;
+      const ring2 = targetRadius * 0.3 + gs * 1.35 * Math.max(0, p - 0.1);
+      const ring3 = targetRadius * 0.25 + gs * 0.95 * Math.max(0, p - 0.2);
+
+      ctx.strokeStyle = hexToRgba(col, 0.92 * fade);
+      ctx.lineWidth = 5.5 * (1 - p * 0.6);
       ctx.beginPath();
-      ctx.arc(v.dx, v.dy, ringR, 0, Math.PI * 2);
+      ctx.arc(v.dx, v.dy, ring1, 0, Math.PI * 2);
       ctx.stroke();
 
-      v.particles.forEach(pt => {
-        const px = v.dx + Math.cos(pt.ang) * ringR;
-        const py = v.dy + Math.sin(pt.ang) * ringR;
-        ctx.fillStyle = hexToRgba('#ffffff', fade);
+      if (p > 0.1) {
+        ctx.strokeStyle = hexToRgba('#ffffff', 0.82 * fade);
+        ctx.lineWidth = 3 * (1 - p * 0.5);
         ctx.beginPath();
-        ctx.arc(px, py, pt.size * 0.85, 0, Math.PI * 2);
+        ctx.arc(v.dx, v.dy, ring2, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (p > 0.2) {
+        ctx.strokeStyle = hexToRgba(col, 0.65 * fade);
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 6]);
+        ctx.beginPath();
+        ctx.arc(v.dx, v.dy, ring3, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      v.particles.forEach((pt, idx) => {
+        const px = v.dx + Math.cos(pt.ang) * ring1;
+        const py = v.dy + Math.sin(pt.ang) * ring1;
+        ctx.fillStyle = hexToRgba(idx % 2 === 0 ? '#ffffff' : col, fade);
+        ctx.beginPath();
+        ctx.arc(px, py, pt.size * 0.9, 0, Math.PI * 2);
         ctx.fill();
       });
     }
-
     ctx.restore();
   }
+}
+
+
+// Token portrait image cache (custom uploaded data URLs + tokens/<name>.{png,jpg,jpeg,webp,jfif})
+const tokenPortraitCache = new Map();
+
+function getTokenPortraitCandidates(tok) {
+  if (!tok) return [];
+  const list = [];
+  if (tok.portraitDataUrl) list.push(tok.portraitDataUrl);
+  if (tok.portraitUrl) list.push(tok.portraitUrl);
+
+  const tpl = (appState?.bestiary || []).find(b =>
+    (tok.templateId && b.templateId === tok.templateId) ||
+    (String(b.name || '').trim().toLowerCase() === String(tok.name || '').trim().toLowerCase())
+  );
+  if (tpl?.portraitDataUrl) list.push(tpl.portraitDataUrl);
+  if (tpl?.portraitUrl) list.push(tpl.portraitUrl);
+
+  const rawName = String(tpl?.name || tok.name || '').trim();
+  if (rawName) {
+    const lowerName = rawName.toLowerCase();
+    const slugUnderscore = lowerName.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const slugHyphen = lowerName.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const slugCompact = lowerName.replace(/[^a-z0-9]+/g, '');
+    const titleUnderscore = rawName.replace(/\s+/g, '_');
+    const exts = ['png', 'jpg', 'jpeg', 'webp', 'jfif', 'svg', 'PNG', 'JPG', 'JPEG', 'WEBP', 'JFIF', 'SVG'];
+    const prefixes = ['tokens/tokens_', 'token/tokens_', 'tokens_', 'tokens/', 'token/'];
+
+    const addCandidatesForName = (n) => {
+      if (!n) return;
+      prefixes.forEach(pfx => {
+        exts.forEach(ext => list.push(`${pfx}${n}.${ext}`));
+      });
+    };
+
+    [slugUnderscore, slugHyphen, slugCompact, titleUnderscore, rawName].forEach(addCandidatesForName);
+    if (tok.templateId) {
+      const tplSlug = String(tok.templateId).replace(/^tpl_/, '').toLowerCase();
+      if (tplSlug) addCandidatesForName(tplSlug);
+    }
+  }
+  return Array.from(new Set(list));
+}
+
+function getResolvedTokenPortraitImage(tok) {
+  const candidates = getTokenPortraitCandidates(tok);
+  if (!candidates || candidates.length === 0) return null;
+  const key = candidates.join('|');
+  let entry = tokenPortraitCache.get(key);
+  if (entry) {
+    return entry.status === 'loaded' ? entry.img : null;
+  }
+
+  entry = { status: 'loading', img: null };
+  tokenPortraitCache.set(key, entry);
+
+  const tryIdx = (idx) => {
+    if (idx >= candidates.length) {
+      entry.status = 'failed';
+      return;
+    }
+    const url = candidates[idx];
+    const img = new Image();
+    img.onload = () => {
+      entry.status = 'loaded';
+      entry.img = img;
+    };
+    img.onerror = () => {
+      tryIdx(idx + 1);
+    };
+    img.src = url;
+  };
+  tryIdx(0);
+  return null;
+}
+
+function drawSwarmCrowdTokenArtwork(targetCtx, tok, cx, cy, r, span, gs, aliveUnits, nowMs) {
+  const count = Math.max(2, Math.min(7, Number(aliveUnits) || 2));
+  const img = getResolvedTokenPortraitImage(tok);
+  const tSec = (nowMs || 0) * 0.001;
+  const subR = Math.max(9, r * (count <= 3 ? 0.54 : 0.46));
+  const orbitR = Math.max(6, r * (count <= 3 ? 0.44 : 0.52));
+  const strokeCol = tok.color || '#ef4444';
+
+  // Arrange rear/flanking pack members first, then foreground leader last so depth/stacking reads clearly
+  const offsets = [];
+  if (count === 2) {
+    offsets.push({ dx: -orbitR * 0.85, dy: -orbitR * 0.35, scale: 0.9, z: 0 });
+    offsets.push({ dx: orbitR * 0.72, dy: orbitR * 0.38, scale: 1.0, z: 1 });
+  } else if (count === 3) {
+    offsets.push({ dx: 0, dy: -orbitR * 0.85, scale: 0.86, z: 0 });
+    offsets.push({ dx: -orbitR * 0.82, dy: orbitR * 0.42, scale: 0.96, z: 1 });
+    offsets.push({ dx: orbitR * 0.82, dy: orbitR * 0.42, scale: 1.0, z: 2 });
+  } else {
+    const shown = Math.min(6, count);
+    const backCount = Math.ceil(shown / 2);
+    for (let i = 0; i < shown; i++) {
+      const isBack = i < backCount;
+      const idxInRow = isBack ? i : (i - backCount);
+      const rowLen = isBack ? backCount : (shown - backCount);
+      const frac = rowLen === 1 ? 0 : (idxInRow / (rowLen - 1)) * 2 - 1;
+      offsets.push({
+        dx: frac * orbitR * 0.95,
+        dy: (isBack ? -0.58 : 0.54) * orbitR,
+        scale: isBack ? 0.86 : 1.0,
+        z: isBack ? 0 : 1
+      });
+    }
+  }
+
+  offsets.sort((a, b) => a.z - b.z);
+
+  offsets.forEach((off, idx) => {
+    const bob = Math.sin(tSec * 3.8 + idx * 1.35) * 1.4;
+    const sx = cx + off.dx;
+    const sy = cy + off.dy + bob;
+    const sr = subR * off.scale;
+
+    targetCtx.save();
+    // Subtle dark drop shadow behind each member so overlapping crowd silhouettes separate cleanly
+    targetCtx.fillStyle = 'rgba(2, 6, 15, 0.78)';
+    targetCtx.beginPath();
+    targetCtx.arc(sx + 1.5, sy + 2, sr, 0, Math.PI * 2);
+    targetCtx.fill();
+
+    targetCtx.fillStyle = '#0f172a';
+    targetCtx.strokeStyle = idx === offsets.length - 1 ? '#fde047' : strokeCol;
+    targetCtx.lineWidth = idx === offsets.length - 1 ? 2.2 : 1.7;
+    targetCtx.beginPath();
+    targetCtx.arc(sx, sy, sr, 0, Math.PI * 2);
+    targetCtx.fill();
+    targetCtx.stroke();
+
+    if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+      targetCtx.beginPath();
+      targetCtx.arc(sx, sy, Math.max(2, sr - 1.2), 0, Math.PI * 2);
+      targetCtx.clip();
+      const nw = img.naturalWidth;
+      const nh = img.naturalHeight;
+      const sc = Math.max((sr * 2) / nw, (sr * 2) / nh);
+      const dw = nw * sc;
+      const dh = nh * sc;
+      targetCtx.drawImage(img, sx - dw / 2, sy - dh / 2, dw, dh);
+    } else {
+      targetCtx.font = `${Math.max(10, Math.round(sr * 1.18))}px sans-serif`;
+      targetCtx.textAlign = 'center';
+      targetCtx.textBaseline = 'middle';
+      targetCtx.fillStyle = '#f8fafc';
+      targetCtx.fillText(tok.iconSymbol || '👹', sx, sy + 0.5);
+    }
+    targetCtx.restore();
+  });
+}
+
+const TOKEN_PUCK_TILT_Y = 0.84;
+
+function drawPhysicalMiniaturePedestal(targetCtx, tok, baseCx, baseCy, r, elevFt, isDragging, nowMs = 0) {
+  const z = clampElevationFt(elevFt);
+  const liftPx = (z / 5) * 4.2 + (isDragging ? 7 : 0);
+  const topCx = baseCx + (isDragging ? 2.5 : 0);
+  const topCy = baseCy - liftPx;
+  const topR = r;
+  const topRy = topR * TOKEN_PUCK_TILT_Y;
+  const col = tok.color || (tok.role === 'crawler' ? '#38bdf8' : '#ef4444');
+  const wallH = Math.max(6, Math.min(12, topR * 0.27));
+
+  targetCtx.save();
+
+  // Soft ground shadow underneath the tilted puck
+  targetCtx.fillStyle = 'rgba(2, 5, 12, 0.50)';
+  targetCtx.beginPath();
+  targetCtx.ellipse(baseCx, baseCy + wallH + 2, topR * 0.96, topRy * 0.56, 0, 0, Math.PI * 2);
+  targetCtx.fill();
+
+  // 3D cylindrical puck side wall (100% opaque with shaded cylindrical wrap & seamless outer edge)
+  targetCtx.beginPath();
+  targetCtx.moveTo(topCx + topR, topCy);
+  targetCtx.lineTo(topCx + topR, topCy + wallH);
+  targetCtx.ellipse(topCx, topCy + wallH, topR, topRy, 0, 0, Math.PI, false);
+  targetCtx.lineTo(topCx - topR, topCy);
+  targetCtx.ellipse(topCx, topCy, topR, topRy, 0, Math.PI, 0, true);
+  targetCtx.closePath();
+
+  // Solid opaque dark backing so the board never bleeds through the token wall
+  targetCtx.fillStyle = '#090d16';
+  targetCtx.fill();
+
+  // Opaque-looking cylindrical color shading layered over the solid backing
+  const wallGrad = targetCtx.createLinearGradient(topCx - topR, topCy, topCx + topR, topCy);
+  wallGrad.addColorStop(0, hexToRgba(col, 0.45));
+  wallGrad.addColorStop(0.32, hexToRgba(col, 0.95));
+  wallGrad.addColorStop(0.68, hexToRgba(col, 0.85));
+  wallGrad.addColorStop(1, hexToRgba(col, 0.40));
+  targetCtx.fillStyle = wallGrad;
+  targetCtx.fill();
+
+  // Continuous U-shaped outer rim stroke connecting left/right sides smoothly into the bottom ring (no divots)
+  targetCtx.strokeStyle = col;
+  targetCtx.lineWidth = 2.4;
+  targetCtx.lineJoin = 'round';
+  targetCtx.lineCap = 'round';
+  targetCtx.beginPath();
+  targetCtx.moveTo(topCx + topR, topCy);
+  targetCtx.lineTo(topCx + topR, topCy + wallH);
+  targetCtx.ellipse(topCx, topCy + wallH, topR, topRy, 0, 0, Math.PI, false);
+  targetCtx.lineTo(topCx - topR, topCy);
+  targetCtx.stroke();
+
+  // Tilted top face of puck
+  targetCtx.fillStyle = '#0f172a';
+  targetCtx.strokeStyle = col;
+  targetCtx.lineWidth = 2.6;
+  targetCtx.beginPath();
+  targetCtx.ellipse(topCx, topCy, topR, topRy, 0, 0, Math.PI * 2);
+  targetCtx.fill();
+  targetCtx.stroke();
+
+  // Subtle upper-rim specular glint to sell the angled 3D bevel
+  targetCtx.strokeStyle = 'rgba(255, 255, 255, 0.24)';
+  targetCtx.lineWidth = 1.4;
+  targetCtx.beginPath();
+  targetCtx.ellipse(topCx, topCy, Math.max(2, topR - 1.2), Math.max(2, topRy - 1.0), 0, Math.PI * 1.12, Math.PI * 1.88, false);
+  targetCtx.stroke();
+
+  targetCtx.restore();
+  return { cx: topCx, cy: topCy, r: topR, ry: topRy, liftPx };
+}
+
+function drawTokenArtwork(targetCtx, tok, cx, cy, r, span, gs, nowMs = 0) {
+  const isDragging = Boolean(uiState.isDraggingToken && uiState.draggedTokenId === tok.id);
+  const elevFt = typeof getTokenElevationFt === 'function' ? getTokenElevationFt(tok, getActiveScene()) : 0;
+  const mini = drawPhysicalMiniaturePedestal(targetCtx, tok, cx, cy, r, elevFt, isDragging, nowMs);
+  const drawCx = mini.cx;
+  const drawCy = mini.cy;
+  const drawR = mini.r;
+  const drawRy = mini.ry;
+
+  if (tok && tok.role !== 'crawler') {
+    const hm = getTokenHealthMetrics(tok);
+    if (hm.swarmCount > 1 && hm.aliveUnits > 1) {
+      drawSwarmCrowdTokenArtwork(targetCtx, tok, drawCx, drawCy, drawR, span, gs, hm.aliveUnits, nowMs);
+      return;
+    }
+  }
+  const img = getResolvedTokenPortraitImage(tok);
+  if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.ellipse(drawCx, drawCy, Math.max(2, drawR - 1.5), Math.max(2, drawRy - 1.3), 0, 0, Math.PI * 2);
+    targetCtx.clip();
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    const scale = Math.max((drawR * 2) / nw, (drawR * 2) / nh);
+    const dw = nw * scale;
+    const dh = nh * scale * TOKEN_PUCK_TILT_Y;
+    targetCtx.drawImage(img, drawCx - dw / 2, drawCy - dh / 2, dw, dh);
+    targetCtx.restore();
+    return;
+  }
+
+  targetCtx.save();
+  targetCtx.translate(drawCx, drawCy);
+  targetCtx.scale(1, TOKEN_PUCK_TILT_Y);
+  targetCtx.font = `${Math.round(gs * span * 0.44)}px sans-serif`;
+  targetCtx.textAlign = 'center';
+  targetCtx.textBaseline = 'middle';
+  targetCtx.fillStyle = '#f8fafc';
+  targetCtx.fillText(tok.iconSymbol || (tok.role === 'crawler' ? '⚔️' : '👹'), 0, 0);
+  targetCtx.restore();
 }
 
 const tokenVisualPos = new Map();
@@ -1311,6 +2302,31 @@ function drawTokenMotionTrail(targetCtx, tok, anim, gs, nowMs) {
 // =========================================================================
 // 5. MAIN 60FPS BATTLE CANVAS RENDERER
 // =========================================================================
+function drawTacticalGridLines(targetCtx, scene, gs, minWorldX, minWorldY, maxWorldX, maxWorldY, subtleOverDarkness = false) {
+  if (!uiState.gridVisible || !scene) return;
+  const baseAlpha = scene.gridAlpha ?? 0.2;
+  const alpha = subtleOverDarkness ? Math.max(0.08, Math.min(0.22, baseAlpha * 0.65)) : Math.max(0.14, baseAlpha);
+  const startCol = Math.floor(minWorldX / gs) - 1;
+  const endCol = Math.min(startCol + 260, Math.ceil(maxWorldX / gs) + 1);
+  const startRow = Math.floor(minWorldY / gs) - 1;
+  const endRow = Math.min(startRow + 260, Math.ceil(maxWorldY / gs) + 1);
+
+  targetCtx.save();
+  targetCtx.strokeStyle = `rgba(148, 163, 184, ${alpha.toFixed(3)})`;
+  targetCtx.lineWidth = 1 / uiState.camZoom;
+  targetCtx.beginPath();
+  for (let c = startCol; c <= endCol; c++) {
+    targetCtx.moveTo(c * gs, startRow * gs);
+    targetCtx.lineTo(c * gs, endRow * gs);
+  }
+  for (let r = startRow; r <= endRow; r++) {
+    targetCtx.moveTo(startCol * gs, r * gs);
+    targetCtx.lineTo(endCol * gs, r * gs);
+  }
+  targetCtx.stroke();
+  targetCtx.restore();
+}
+
 function renderBattleCanvas(timestamp) {
   const wrap = document.getElementById('canvasWrapper');
   const dpr = window.devicePixelRatio || 1;
@@ -1387,27 +2403,179 @@ function renderBattleCanvas(timestamp) {
     }
   }
 
-  // 2. Tactical Square Grid Lines
-  if (uiState.gridVisible) {
-    const alpha = scene.gridAlpha ?? 0.2;
-    const startCol = Math.floor(minWorldX / gs) - 1;
-    const endCol = Math.min(startCol + 260, Math.ceil(maxWorldX / gs) + 1);
-    const startRow = Math.floor(minWorldY / gs) - 1;
-    const endRow = Math.min(startRow + 260, Math.ceil(maxWorldY / gs) + 1);
+  // 1b. Raised / Lowered 2.5D Terrain Zones (5ft steps) — Progressive Surface Shading & Extruded Depth
+  if (typeof getTerrainZonesForScene === 'function') {
+    const tZones = getTerrainZonesForScene(scene);
+    const activeSet = new Set();
+    const cellElevMap = new Map();
+    tZones.forEach(z => {
+      if (IS_PLAYER_WINDOW && z.hiddenFromPlayers) return;
+      const zElev = clampElevationFt(z.elevationFt);
+      if (zElev === 0) return;
+      const x1 = Math.min(z.gx1, z.gx2);
+      const x2 = Math.max(z.gx1, z.gx2);
+      const y1 = Math.min(z.gy1, z.gy2);
+      const y2 = Math.max(z.gy1, z.gy2);
+      for (let gx = x1; gx <= x2; gx++) {
+        for (let gy = y1; gy <= y2; gy++) {
+          activeSet.add(`${gx},${gy}`);
+          cellElevMap.set(`${gx},${gy}`, zElev);
+        }
+      }
+    });
 
-    ctx.strokeStyle = `rgba(148, 163, 184, ${alpha})`;
-    ctx.lineWidth = 1 / uiState.camZoom;
-    ctx.beginPath();
-    for (let c = startCol; c <= endCol; c++) {
-      ctx.moveTo(c * gs, startRow * gs);
-      ctx.lineTo(c * gs, endRow * gs);
+    if (activeSet.size > 0) {
+      const getElev = (gx, gy) => cellElevMap.get(`${gx},${gy}`) || 0;
+      const maxStepsScale = 8; // steps (40ft) until near-peak shading saturation
+
+      // Pass A: Progressive surface tint + darkening as elevation moves higher (+5ft, +10ft...) or lower (-5ft, -10ft...)
+      activeSet.forEach(key => {
+        const [gxS, gyS] = key.split(',');
+        const gx = Number(gxS);
+        const gy = Number(gyS);
+        const zElev = getElev(gx, gy);
+        const absSteps = Math.max(1, Math.abs(zElev) / 5);
+        const intensity = Math.min(1, absSteps / maxStepsScale);
+        const x0 = gx * gs;
+        const y0 = gy * gs;
+
+        ctx.save();
+        if (zElev < 0) {
+          // Starts with a light cyan surface shift at -5ft, then deepens & darkens progressively as it goes deeper
+          const tintAlpha = (0.09 + intensity * 0.14).toFixed(3);
+          const darkAlpha = (0.08 + Math.pow(intensity, 0.85) * 0.56).toFixed(3);
+          ctx.fillStyle = `rgba(56, 189, 248, ${tintAlpha})`;
+          ctx.fillRect(x0, y0, gs, gs);
+          ctx.fillStyle = `rgba(2, 6, 16, ${darkAlpha})`;
+          ctx.fillRect(x0, y0, gs, gs);
+
+          // Inner pit wall drop-offs where neighbors are higher
+          const nTop = getElev(gx, gy - 1);
+          if (nTop > zElev) {
+            const diffSteps = Math.max(1, (nTop - zElev) / 5);
+            const wallH = Math.min(gs * 0.36, diffSteps * 5.5);
+            const gTop = ctx.createLinearGradient(x0, y0, x0, y0 + wallH);
+            gTop.addColorStop(0, `rgba(2, 6, 16, ${Math.min(0.96, 0.55 + diffSteps * 0.1).toFixed(3)})`);
+            gTop.addColorStop(1, 'rgba(14, 116, 144, 0.12)');
+            ctx.fillStyle = gTop;
+            ctx.fillRect(x0, y0, gs, wallH);
+          }
+          const nLeft = getElev(gx - 1, gy);
+          if (nLeft > zElev) {
+            const diffSteps = Math.max(1, (nLeft - zElev) / 5);
+            const wallW = Math.min(gs * 0.36, diffSteps * 5.5);
+            const gLeft = ctx.createLinearGradient(x0, y0, x0 + wallW, y0);
+            gLeft.addColorStop(0, `rgba(2, 6, 16, ${Math.min(0.96, 0.55 + diffSteps * 0.1).toFixed(3)})`);
+            gLeft.addColorStop(1, 'rgba(14, 116, 144, 0.12)');
+            ctx.fillStyle = gLeft;
+            ctx.fillRect(x0, y0, wallW, gs);
+          }
+
+          // Stepped contour lines inside pit
+          const contourCount = Math.min(4, absSteps);
+          for (let c = 1; c <= contourCount; c++) {
+            const inset = (c / (contourCount + 1)) * (gs * 0.34);
+            ctx.strokeStyle = `rgba(56, 189, 248, ${(0.14 + intensity * 0.2).toFixed(3)})`;
+            ctx.lineWidth = 1 / uiState.camZoom;
+            ctx.strokeRect(x0 + inset, y0 + inset, gs - inset * 2, gs - inset * 2);
+          }
+        } else {
+          // Raised platform: shifts deck up-left, starts with light warm amber shift at +5ft, darkens progressively as it rises
+          const liftX = -Math.min(gs * 0.26, absSteps * 3.0);
+          const liftY = -Math.min(gs * 0.34, absSteps * 4.2);
+
+          // Extruded south/east cliff face from ground to raised deck
+          const sElev = getElev(gx, gy + 1);
+          if (sElev < zElev) {
+            const diffSteps = Math.max(1, (zElev - sElev) / 5);
+            const cliffH = Math.max(4, Math.min(gs * 0.42, diffSteps * 6.0));
+            const grad = ctx.createLinearGradient(x0 + liftX, y0 + gs + liftY, x0 + liftX, y0 + gs + liftY + cliffH);
+            grad.addColorStop(0, `rgba(217, 119, 6, ${Math.min(0.85, 0.42 + intensity * 0.4).toFixed(3)})`);
+            grad.addColorStop(1, `rgba(38, 16, 4, ${Math.min(0.96, 0.68 + intensity * 0.28).toFixed(3)})`);
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.moveTo(x0 + liftX, y0 + gs + liftY);
+            ctx.lineTo(x0 + gs + liftX, y0 + gs + liftY);
+            ctx.lineTo(x0 + gs, y0 + gs + Math.max(0, cliffH + liftY));
+            ctx.lineTo(x0, y0 + gs + Math.max(0, cliffH + liftY));
+            ctx.closePath();
+            ctx.fill();
+          }
+
+          const eElev = getElev(gx + 1, gy);
+          if (eElev < zElev) {
+            const diffSteps = Math.max(1, (zElev - eElev) / 5);
+            const cliffW = Math.max(3, Math.min(gs * 0.32, diffSteps * 4.2));
+            ctx.fillStyle = `rgba(120, 53, 15, ${Math.min(0.92, 0.48 + intensity * 0.42).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.moveTo(x0 + gs + liftX, y0 + liftY);
+            ctx.lineTo(x0 + gs + liftX, y0 + gs + liftY);
+            ctx.lineTo(x0 + gs + cliffW, y0 + gs);
+            ctx.lineTo(x0 + gs + cliffW, y0);
+            ctx.closePath();
+            ctx.fill();
+          }
+
+          // Top surface: light amber tint at +5ft that deepens and darkens progressively as elevation climbs
+          const tintAlpha = (0.09 + intensity * 0.14).toFixed(3);
+          const darkAlpha = (0.05 + Math.pow(intensity, 0.85) * 0.50).toFixed(3);
+          ctx.fillStyle = `rgba(251, 191, 36, ${tintAlpha})`;
+          ctx.fillRect(x0 + liftX, y0 + liftY, gs, gs);
+          ctx.fillStyle = `rgba(18, 10, 4, ${darkAlpha})`;
+          ctx.fillRect(x0 + liftX, y0 + liftY, gs, gs);
+
+          // Top bevel highlight
+          ctx.strokeStyle = `rgba(254, 240, 138, ${(0.55 + intensity * 0.35).toFixed(3)})`;
+          ctx.lineWidth = 1.6 / uiState.camZoom;
+          ctx.strokeRect(x0 + liftX + 0.5, y0 + liftY + 0.5, gs - 1, gs - 1);
+        }
+        ctx.restore();
+      });
+
+      // Pass B: Crisp step rim borders & elevation badges on GM view
+      activeSet.forEach(key => {
+        const [gxS, gyS] = key.split(',');
+        const gx = Number(gxS);
+        const gy = Number(gyS);
+        const zElev = getElev(gx, gy);
+        const absSteps = Math.max(1, Math.abs(zElev) / 5);
+        const liftX = zElev > 0 ? -Math.min(gs * 0.26, absSteps * 3.0) : 0;
+        const liftY = zElev > 0 ? -Math.min(gs * 0.34, absSteps * 4.2) : 0;
+        const x0 = gx * gs + liftX;
+        const y0 = gy * gs + liftY;
+        const x1 = x0 + gs;
+        const y1 = y0 + gs;
+
+        ctx.save();
+        ctx.strokeStyle = zElev > 0 ? 'rgba(251, 191, 36, 0.85)' : 'rgba(56, 189, 248, 0.85)';
+        ctx.lineWidth = 2.2 / uiState.camZoom;
+        ctx.beginPath();
+        if (getElev(gx, gy - 1) !== zElev) { ctx.moveTo(x0, y0); ctx.lineTo(x1, y0); }
+        if (getElev(gx, gy + 1) !== zElev) { ctx.moveTo(x0, y1); ctx.lineTo(x1, y1); }
+        if (getElev(gx - 1, gy) !== zElev) { ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); }
+        if (getElev(gx + 1, gy) !== zElev) { ctx.moveTo(x1, y0); ctx.lineTo(x1, y1); }
+        ctx.stroke();
+
+        const badge = formatElevationBadge(zElev);
+        if (badge && !IS_PLAYER_WINDOW) {
+          ctx.font = 'bold 10px JetBrains Mono, monospace';
+          const tw = ctx.measureText(badge).width + 8;
+          ctx.fillStyle = 'rgba(7, 9, 14, 0.88)';
+          ctx.beginPath();
+          ctx.roundRect(x0 + 4, y0 + 4, tw, 15, 4);
+          ctx.fill();
+          ctx.fillStyle = zElev > 0 ? '#fbbf24' : '#7dd3fc';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(badge, x0 + 8, y0 + 11.5);
+        }
+        ctx.restore();
+      });
     }
-    for (let r = startRow; r <= endRow; r++) {
-      ctx.moveTo(startCol * gs, r * gs);
-      ctx.lineTo(endCol * gs, r * gs);
-    }
-    ctx.stroke();
   }
+
+  // 2. Tactical Square Grid Lines
+  drawTacticalGridLines(ctx, scene, gs, minWorldX, minWorldY, maxWorldX, maxWorldY, false);
 
   // 3. Tactical 4-Ring Movement Overlays (GM sees any selected token; Player sees own claimed crawler clipped under FoW)
   const drawGmTacticalOverlays = () => {
@@ -1507,8 +2675,142 @@ function renderBattleCanvas(timestamp) {
         ctx.setLineDash([6 / uiState.camZoom, 4 / uiState.camZoom]);
         ctx.stroke();
         ctx.setLineDash([]);
+
+        // Visual AoE & 50% Splash Footprint Preview (Blast / Burst / Cone / Line / Splash)
+        const aoe = effPrev.aoeSpec;
+        if (aoe && aoe.hasAoe) {
+          const tgtTok = effPrev.targetId ? (scene.tokens || []).find(t => t.id === effPrev.targetId) : null;
+          const isFromTarget = aoe.shape === 'blast' || aoe.shape === 'splash_only';
+          const aOx = (isFromTarget && tgtTok) ? (tgtTok.gx + 0.5) * gs : ox;
+          const aOy = (isFromTarget && tgtTok) ? (tgtTok.gy + 0.5) * gs : oy;
+          const primPx = (aoe.primaryFt / 5) * gs;
+          const totalPx = ((aoe.primaryFt + aoe.splashFt) / 5) * gs;
+          const dirAng = tgtTok ? Math.atan2((tgtTok.gy - sGy), (tgtTok.gx - sGx)) : 0;
+
+          if (aoe.shape === 'blast' || aoe.shape === 'burst' || aoe.shape === 'splash_only') {
+            if (aoe.splashFt > 0 && totalPx > 0) {
+              ctx.beginPath();
+              ctx.arc(aOx, aOy, totalPx, 0, Math.PI * 2);
+              ctx.fillStyle = 'rgba(251, 191, 36, 0.14)';
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(251, 191, 36, 0.8)';
+              ctx.lineWidth = 2 / uiState.camZoom;
+              ctx.setLineDash([5 / uiState.camZoom, 4 / uiState.camZoom]);
+              ctx.stroke();
+              ctx.setLineDash([]);
+            }
+            if (primPx > 0) {
+              ctx.beginPath();
+              ctx.arc(aOx, aOy, primPx, 0, Math.PI * 2);
+              ctx.fillStyle = 'rgba(249, 115, 22, 0.26)';
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(249, 115, 22, 0.95)';
+              ctx.lineWidth = 2.4 / uiState.camZoom;
+              ctx.stroke();
+            }
+          } else if (aoe.shape === 'cone') {
+            const halfArc = Math.PI / 6; // 60 deg cone
+            if (aoe.splashFt > 0 && totalPx > 0) {
+              ctx.beginPath();
+              ctx.moveTo(ox, oy);
+              ctx.arc(ox, oy, totalPx, dirAng - halfArc, dirAng + halfArc);
+              ctx.closePath();
+              ctx.fillStyle = 'rgba(251, 191, 36, 0.15)';
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(251, 191, 36, 0.85)';
+              ctx.lineWidth = 2 / uiState.camZoom;
+              ctx.setLineDash([5 / uiState.camZoom, 4 / uiState.camZoom]);
+              ctx.stroke();
+              ctx.setLineDash([]);
+            }
+            if (primPx > 0) {
+              ctx.beginPath();
+              ctx.moveTo(ox, oy);
+              ctx.arc(ox, oy, primPx, dirAng - halfArc, dirAng + halfArc);
+              ctx.closePath();
+              ctx.fillStyle = 'rgba(249, 115, 22, 0.28)';
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(249, 115, 22, 0.95)';
+              ctx.lineWidth = 2.4 / uiState.camZoom;
+              ctx.stroke();
+            }
+          } else if (aoe.shape === 'line') {
+            const drawLineRect = (lenPx, fill, stroke, dashed) => {
+              ctx.save();
+              ctx.translate(ox, oy);
+              ctx.rotate(dirAng);
+              ctx.fillStyle = fill;
+              ctx.strokeStyle = stroke;
+              ctx.lineWidth = 2 / uiState.camZoom;
+              if (dashed) ctx.setLineDash([5 / uiState.camZoom, 4 / uiState.camZoom]);
+              ctx.fillRect(0, -gs * 0.5, lenPx, gs);
+              ctx.strokeRect(0, -gs * 0.5, lenPx, gs);
+              ctx.restore();
+            };
+            if (aoe.splashFt > 0 && totalPx > 0) {
+              drawLineRect(totalPx, 'rgba(251, 191, 36, 0.15)', 'rgba(251, 191, 36, 0.85)', true);
+            }
+            if (primPx > 0) {
+              drawLineRect(primPx, 'rgba(249, 115, 22, 0.28)', 'rgba(249, 115, 22, 0.95)', false);
+            }
+          }
+        }
         ctx.restore();
       }
+    }
+
+    // 3a-iii. Step 1/2 Mob Telegraph Intent Arrows (Dashed Red Lines to Targeted Crawlers)
+    const declaredAtks = Array.isArray(scene.declaredMobAttacks) ? scene.declaredMobAttacks : [];
+    if (declaredAtks.length > 0 && (appState?.round || 0) > 0) {
+      ctx.save();
+      declaredAtks.forEach(decl => {
+        const mob = (scene.tokens || []).find(t => t.id === decl.mobId);
+        if (!mob || mob.hiddenFromPlayers || getTokenHealthMetrics(mob).curHp <= 0) return;
+        const mVis = getTokenVisualGridPos(mob, nowMs);
+        const mx = (mVis.gx + 0.5) * gs;
+        const my = (mVis.gy + 0.5) * gs;
+        (decl.targetIds || []).forEach(tid => {
+          const tgt = (scene.tokens || []).find(t => t.id === tid);
+          if (!tgt) return;
+          const tVis = getTokenVisualGridPos(tgt, nowMs);
+          const tx = (tVis.gx + 0.5) * gs;
+          const ty = (tVis.gy + 0.5) * gs;
+          const ang = Math.atan2(ty - my, tx - mx);
+          const dist = Math.hypot(tx - mx, ty - my);
+          if (dist < 10) return;
+          const endX = tx - Math.cos(ang) * (gs * 0.44);
+          const endY = ty - Math.sin(ang) * (gs * 0.44);
+
+          ctx.strokeStyle = 'rgba(244, 63, 94, 0.88)';
+          ctx.lineWidth = 2.6 / uiState.camZoom;
+          ctx.setLineDash([8 / uiState.camZoom, 5 / uiState.camZoom]);
+          ctx.lineDashOffset = -now * 28;
+          ctx.beginPath();
+          ctx.moveTo(mx, my);
+          ctx.lineTo(endX, endY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Arrowhead
+          const headLen = 10 / uiState.camZoom;
+          ctx.fillStyle = 'rgba(251, 113, 133, 0.95)';
+          ctx.beginPath();
+          ctx.moveTo(endX, endY);
+          ctx.lineTo(endX - headLen * Math.cos(ang - Math.PI / 6), endY - headLen * Math.sin(ang - Math.PI / 6));
+          ctx.lineTo(endX - headLen * Math.cos(ang + Math.PI / 6), endY - headLen * Math.sin(ang + Math.PI / 6));
+          ctx.closePath();
+          ctx.fill();
+
+          // Red targeting reticle pulse around targeted crawler
+          const rPulse = 0.55 + Math.sin(now * 5) * 0.25;
+          ctx.strokeStyle = `rgba(244, 63, 94, ${rPulse})`;
+          ctx.lineWidth = 2.5 / uiState.camZoom;
+          ctx.beginPath();
+          ctx.arc(tx, ty, gs * 0.52, 0, Math.PI * 2);
+          ctx.stroke();
+        });
+      });
+      ctx.restore();
     }
 
     // 3b. Drag Origin Ghost & Live Distance Readout
@@ -1630,43 +2932,11 @@ function renderBattleCanvas(timestamp) {
       ctx.strokeStyle = '#fbbf24';
       ctx.lineWidth = 3.5;
       ctx.beginPath();
-      ctx.arc(cx, cy, r + 5, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy, r + 5, (r + 5) * TOKEN_PUCK_TILT_Y, 0, 0, Math.PI * 2);
       ctx.stroke();
     }
 
-    ctx.fillStyle = '#0f172a';
-    ctx.strokeStyle = tok.color || (tok.role === 'crawler' ? '#38bdf8' : '#ef4444');
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    // Health arc around token
-    if (hm.pct > 0) {
-      ctx.strokeStyle = tok.role === 'crawler' ? '#10b981' : '#f43f5e';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r + 1.5, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * (hm.pct / 100)));
-      ctx.stroke();
-    }
-
-    // Shield ring if active
-    if ((tok.shieldPips || 0) > 0) {
-      ctx.strokeStyle = '#7dd3fc';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([5, 3]);
-      ctx.beginPath();
-      ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
-    ctx.font = `${Math.round(gs * span * 0.44)}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#f8fafc';
-    ctx.fillText(tok.iconSymbol || (tok.role === 'crawler' ? '⚔️' : '👹'), cx, cy);
+    drawTokenArtwork(ctx, tok, cx, cy, r, span, gs, nowMs);
 
     // Swarm / Pack count badge (e.g., ×4)
     if (tok.role !== 'crawler' && hm.swarmCount > 1) {
@@ -1686,18 +2956,6 @@ function renderBattleCanvas(timestamp) {
       ctx.fillText(badgeTxt, bx + bw / 2, by + 7.5);
     }
 
-    // Nameplate pill below token
-    const label = tok.name || '';
-    if (label) {
-      ctx.font = 'bold 10px Inter, sans-serif';
-      const tw = ctx.measureText(label).width + 8;
-      ctx.fillStyle = 'rgba(7, 9, 14, 0.85)';
-      ctx.beginPath();
-      ctx.roundRect(cx - tw / 2, cy + r + 3, tw, 14, 4);
-      ctx.fill();
-      ctx.fillStyle = tok.role === 'crawler' ? '#bae6fd' : '#fecdd3';
-      ctx.fillText(label, cx, cy + r + 10);
-    }
     ctx.restore();
   });
 
@@ -1879,13 +3137,44 @@ function renderBattleCanvas(timestamp) {
     ctx.drawImage(darknessCanvas, 0, 0);
   }
 
-  // 10b. GM Screen Overlay: Keep Tactical Movement Rings, Tokens, Objects, Light Markers & Walls Crisp Above Darkness
+  // Colored Light Pools & Cast Tint Overlay (for dropped lights, tokens, and lit map objects)
+  if (lightSources.length > 0) {
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    lightSources.forEach(src => {
+      const unclippedFt = src.dimOnly ? src.radiusFt : src.radiusFt * 2;
+      const effMaxFt = (src.maxReachFt && src.maxReachFt > 0) ? Math.min(unclippedFt, src.maxReachFt) : unclippedFt;
+      const maxPx = (effMaxFt / 5) * gs;
+      if (IS_PLAYER_WINDOW && !isLightVisibleToCrawlers(src.wx, src.wy, maxPx, crawlerVisList, blockingWalls, src.angleDeg, src.facingDeg)) return;
+
+      const sx = src.wx * uiState.camZoom + uiState.camX;
+      const sy = src.wy * uiState.camZoom + uiState.camY;
+      const sr = maxPx * uiState.camZoom;
+      const poly = computeVisibilityPolygon(src.wx, src.wy, maxPx, blockingWalls, src.angleDeg, src.facingDeg);
+      const screenPoly = poly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
+      const aScale = Math.max(0.2, Math.min(1.3, Number(src.alphaMult ?? 1))) * (0.22 + darknessAlpha * 0.24);
+      const col = src.color || '#f97316';
+
+      const grad = ctx.createRadialGradient(sx, sy, sr * 0.04, sx, sy, sr);
+      grad.addColorStop(0, hexToRgba(col, Math.min(0.65, (src.dimOnly ? 0.24 : 0.42) * aScale)));
+      grad.addColorStop(0.55, hexToRgba(col, Math.min(0.42, (src.dimOnly ? 0.12 : 0.22) * aScale)));
+      grad.addColorStop(1, hexToRgba(col, 0));
+      ctx.fillStyle = grad;
+      traceRayPolygonPath(ctx, sx, sy, screenPoly, src.angleDeg >= 359.5);
+      ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  // 10b. GM Screen Overlay: Keep Tactical Grid, Movement Rings, Tokens, Objects, Light Markers & Walls Crisp Above Darkness
   if (!IS_PLAYER_WINDOW) {
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.translate(uiState.camX, uiState.camY);
     ctx.scale(uiState.camZoom, uiState.camZoom);
 
+    drawTacticalGridLines(ctx, scene, gs, minWorldX, minWorldY, maxWorldX, maxWorldY, true);
     drawGmTacticalOverlays();
 
     // Walls & Doors visible to GM even in 100% darkness
@@ -1976,41 +3265,11 @@ function renderBattleCanvas(timestamp) {
         ctx.strokeStyle = '#fbbf24';
         ctx.lineWidth = 3.5;
         ctx.beginPath();
-        ctx.arc(cx, cy, r + 5, 0, Math.PI * 2);
+        ctx.ellipse(cx, cy, r + 5, (r + 5) * TOKEN_PUCK_TILT_Y, 0, 0, Math.PI * 2);
         ctx.stroke();
       }
 
-      ctx.fillStyle = '#0f172a';
-      ctx.strokeStyle = tok.color || (tok.role === 'crawler' ? '#38bdf8' : '#ef4444');
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-
-      if (hm.pct > 0) {
-        ctx.strokeStyle = tok.role === 'crawler' ? '#10b981' : '#f43f5e';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r + 1.5, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * (hm.pct / 100)));
-        ctx.stroke();
-      }
-
-      if ((tok.shieldPips || 0) > 0) {
-        ctx.strokeStyle = '#7dd3fc';
-        ctx.lineWidth = 2;
-        ctx.setLineDash([5, 3]);
-        ctx.beginPath();
-        ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-
-      ctx.font = `${Math.round(gs * span * 0.44)}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#f8fafc';
-      ctx.fillText(tok.iconSymbol || (tok.role === 'crawler' ? '⚔️' : '👹'), cx, cy);
+      drawTokenArtwork(ctx, tok, cx, cy, r, span, gs, nowMs);
 
       if (tok.role !== 'crawler' && hm.swarmCount > 1) {
         const badgeTxt = `×${hm.aliveUnits}`;
@@ -2029,105 +3288,209 @@ function renderBattleCanvas(timestamp) {
         ctx.fillText(badgeTxt, bx + bw / 2, by + 7.5);
       }
 
-      const label = tok.name || '';
-      if (label) {
-        ctx.font = 'bold 10px Inter, sans-serif';
-        const tw = ctx.measureText(label).width + 8;
-        ctx.fillStyle = 'rgba(7, 9, 14, 0.9)';
-        ctx.beginPath();
-        ctx.roundRect(cx - tw / 2, cy + r + 3, tw, 14, 4);
-        ctx.fill();
-        ctx.fillStyle = tok.role === 'crawler' ? '#bae6fd' : '#fecdd3';
-        ctx.fillText(label, cx, cy + r + 10);
-      }
       ctx.restore();
     });
 
+    if (!IS_PLAYER_WINDOW && uiState.canvasTool === 'floor' && typeof uiState.hoverGx === 'number' && typeof uiState.hoverGy === 'number') {
+      const bMode = uiState.floorBrushMode || 'raise5';
+      const hx = uiState.hoverGx * gs;
+      const hy = uiState.hoverGy * gs;
+      ctx.save();
+      ctx.fillStyle = bMode === 'raise5' ? 'rgba(34, 211, 238, 0.16)' : bMode === 'lower5' ? 'rgba(251, 191, 36, 0.16)' : 'rgba(148, 163, 184, 0.14)';
+      ctx.strokeStyle = bMode === 'raise5' ? '#22d3ee' : bMode === 'lower5' ? '#fbbf24' : '#cbd5e1';
+      ctx.lineWidth = 2 / uiState.camZoom;
+      ctx.setLineDash([4 / uiState.camZoom, 3 / uiState.camZoom]);
+      ctx.fillRect(hx + 1, hy + 1, gs - 2, gs - 2);
+      ctx.strokeRect(hx + 1, hy + 1, gs - 2, gs - 2);
+      ctx.restore();
+    }
     ctx.restore();
   }
 
-  // 11. Player Fog of War Mask (Wall-Clipped LOS + Distant Light Sources + Light Spill Around Corners)
+  // 11. Player Fog of War (Darkened Explored Memory + Tangible Drifting Smoke in Unexplored & Edge of Vision)
   if (IS_PLAYER_WINDOW && crawlerVisList.length > 0) {
-    const camKey = `${uiState.camX.toFixed(1)}|${uiState.camY.toFixed(1)}|${uiState.camZoom.toFixed(3)}`;
+    const isMinimapOffline = Boolean(appState?.minimapOffline);
+    const camKey = `${uiState.camX.toFixed(1)}|${uiState.camY.toFixed(1)}|${uiState.camZoom.toFixed(3)}|${isMinimapOffline ? 1 : 0}`;
     if (exploredMemDirty || camKey !== lastExploredCameraKey) {
       rebuildExploredMemoryBuffer(scene, gs, blockingWalls, w, h);
     }
+    const nowMs = timestamp || performance.now();
+
+    // PASS 1: Explored-but-unseen darkened shroud (clean darkened map memory when Minimap is Online)
+    if (!isMinimapOffline) {
+      fowCtx.save();
+      fowCtx.globalCompositeOperation = 'source-over';
+      fowCtx.clearRect(0, 0, w, h);
+      fowCtx.fillStyle = 'rgba(4, 7, 16, 0.62)';
+      fowCtx.fillRect(0, 0, w, h);
+      carveLiveVisionMask(fowCtx, crawlerVisList, lightSources, gs, blockingWalls, darknessAlpha, 0.72);
+      fowCtx.restore();
+      ctx.drawImage(fowCanvas, 0, 0);
+    }
+
+    // PASS 2: Tangible rolling smoke/mist for Unexplored Fog of War (or everything outside vision if Minimap Offline)
     fowCtx.save();
     fowCtx.globalCompositeOperation = 'source-over';
     fowCtx.clearRect(0, 0, w, h);
-    fowCtx.drawImage(exploredMemCanvas, 0, 0);
+    fowCtx.fillStyle = 'rgba(4, 7, 15, 0.95)';
+    fowCtx.fillRect(0, 0, w, h);
+    drawScrollingSmokeFill(fowCtx, w, h, nowMs, uiState.camZoom, uiState.camX, uiState.camY);
 
-    // Build union clip path of all Crawlers' unobstructed Line of Sight (wall-clipped out to 500ft)
+    // Clip smoke to unexplored territory (when Minimap is Online)
+    if (!isMinimapOffline) {
+      fowCtx.globalCompositeOperation = 'destination-in';
+      fowCtx.drawImage(exploredMemCanvas, 0, 0);
+    }
+
+    // Carve live vision out of the smoke with a soft feathered edge so smoke curls at the edge of vision
+    carveLiveVisionMask(fowCtx, crawlerVisList, lightSources, gs, blockingWalls, darknessAlpha, 0.62);
+    fowCtx.restore();
+    ctx.drawImage(fowCanvas, 0, 0);
+
+    // PASS 3: Wispy smoke fringe curling gently along the outer edge of live vision (tangible mist border)
     fowCtx.save();
-    fowCtx.beginPath();
-    crawlerVisList.forEach(cv => {
-      const screenLosPoly = cv.losPoly.map(p => ({
-        x: p.x * uiState.camZoom + uiState.camX,
-        y: p.y * uiState.camZoom + uiState.camY
-      }));
-      if (screenLosPoly.length > 0) {
-        fowCtx.moveTo(screenLosPoly[0].x, screenLosPoly[0].y);
-        for (let i = 1; i < screenLosPoly.length; i++) {
-          fowCtx.lineTo(screenLosPoly[i].x, screenLosPoly[i].y);
-        }
-        fowCtx.closePath();
-      }
-    });
-    fowCtx.clip();
-
-    fowCtx.globalCompositeOperation = 'destination-out';
-
-    // A. When ambient lighting is Bright or Dim (darkness < 0.85), reveal full unobstructed Crawler LOS!
-    //    In True Darkness (darkness >= 0.85), reveal each crawler's personal touch/torch vision radius.
-    const isTrueDark = darknessAlpha >= 0.85;
+    fowCtx.globalCompositeOperation = 'source-over';
+    fowCtx.clearRect(0, 0, w, h);
+    fowCtx.globalAlpha = 0.34;
+    drawScrollingSmokeFill(fowCtx, w, h, nowMs * 1.15 + 9000, uiState.camZoom, uiState.camX, uiState.camY);
+    fowCtx.globalAlpha = 1;
+    // Keep only a soft ring around each crawler's vision perimeter
+    fowCtx.globalCompositeOperation = 'destination-in';
     crawlerVisList.forEach(cv => {
       const sx = cv.ox * uiState.camZoom + uiState.camX;
       const sy = cv.oy * uiState.camZoom + uiState.camY;
-      if (!isTrueDark) {
-        const fullSr = cv.losRadiusPx * uiState.camZoom;
-        const screenLosPoly = cv.losPoly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
-        const grad = fowCtx.createRadialGradient(sx, sy, fullSr * 0.85, sx, sy, fullSr);
-        grad.addColorStop(0, 'rgba(0, 0, 0, 1)');
-        grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        fowCtx.fillStyle = grad;
-        traceRayPolygonPath(fowCtx, sx, sy, screenLosPoly, true);
-        fowCtx.fill();
-      } else {
-        const sr = cv.radiusPx * uiState.camZoom;
-        const screenPoly = cv.poly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
-        const grad = fowCtx.createRadialGradient(sx, sy, sr * 0.72, sx, sy, sr);
-        grad.addColorStop(0, 'rgba(0, 0, 0, 1)');
-        grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        fowCtx.fillStyle = grad;
-        traceRayPolygonPath(fowCtx, sx, sy, screenPoly, true);
-        fowCtx.fill();
+      const baseR = (darknessAlpha >= 0.85 ? cv.radiusPx : Math.min(cv.radiusPx * 1.45, cv.losRadiusPx)) * uiState.camZoom;
+      const outerR = baseR * 1.24;
+      const ringGrad = fowCtx.createRadialGradient(sx, sy, baseR * 0.68, sx, sy, outerR);
+      ringGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      ringGrad.addColorStop(0.55, 'rgba(0, 0, 0, 0.85)');
+      ringGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      fowCtx.fillStyle = ringGrad;
+      fowCtx.beginPath();
+      fowCtx.arc(sx, sy, outerR, 0, Math.PI * 2);
+      fowCtx.fill();
+    });
+    // Ensure live interior stays crystal clear
+    carveLiveVisionMask(fowCtx, crawlerVisList, lightSources, gs, blockingWalls, darknessAlpha, 0.72);
+    fowCtx.restore();
+    ctx.drawImage(fowCanvas, 0, 0);
+  }
+
+  // 11b. DCC HUD Minimap Detection Blips (Red Dots for Detected Mobs, Blue Dots / Blue X for Crawlers)
+  if (IS_PLAYER_WINDOW && !appState?.minimapOffline && typeof isMobDetectedOnMinimap === 'function') {
+    const detProfile = getPartyMinimapDetectionProfile(scene);
+    const pulseWave = (now % 1.8) / 1.8;
+    const dotPulse = 0.86 + Math.sin(now * 4.2) * 0.14;
+
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.translate(uiState.camX, uiState.camY);
+    ctx.scale(uiState.camZoom, uiState.camZoom);
+
+    (scene.tokens || []).forEach(tok => {
+      const vis = getTokenVisualGridPos(tok, nowMs);
+      const cx = (vis.gx + 0.5) * gs;
+      const cy = (vis.gy + 0.5) * gs;
+      const inLiveLos = isPointSeenInLightOrSight(cx, cy, scene, gs, crawlerVisList, blockingWalls);
+
+      if (tok.role === 'mob') {
+        if (inLiveLos) return;
+        const det = isMobDetectedOnMinimap(tok, scene);
+        if (!det.detected) return;
+
+        const baseR = Math.max(6.5, gs * 0.16) * (det.showSizeAndKnown ? det.dotScale : 1);
+        const pingR = baseR * (1.2 + pulseWave * 1.9);
+
+        // Expanding radar ping ring
+        ctx.strokeStyle = `rgba(244, 63, 94, ${(1 - pulseWave) * 0.72})`;
+        ctx.lineWidth = 2 / uiState.camZoom;
+        ctx.beginPath();
+        ctx.arc(cx, cy, pingR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Glowing crimson core dot
+        const g = ctx.createRadialGradient(cx, cy, baseR * 0.15, cx, cy, baseR * 1.65);
+        g.addColorStop(0, `rgba(255, 228, 230, ${0.95 * dotPulse})`);
+        g.addColorStop(0.45, `rgba(239, 68, 68, ${0.95 * dotPulse})`);
+        g.addColorStop(1, 'rgba(239, 68, 68, 0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, baseR * 1.65, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#ef4444';
+        ctx.strokeStyle = '#fecdd3';
+        ctx.lineWidth = 1.6 / uiState.camZoom;
+        ctx.beginPath();
+        ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Acute Ears Rank 5+: Size & Known/Unknown tag beneath red dot
+        if (det.showSizeAndKnown) {
+          const tag = `${det.sizeLabel} • ${det.known ? 'Known' : 'Unknown'}`;
+          ctx.font = 'bold 9.5px JetBrains Mono, monospace';
+          const tw = ctx.measureText(tag).width + 8;
+          const ty = cy + baseR + 9;
+          ctx.fillStyle = 'rgba(7, 9, 14, 0.88)';
+          ctx.strokeStyle = 'rgba(244, 63, 94, 0.7)';
+          ctx.lineWidth = 1 / uiState.camZoom;
+          ctx.beginPath();
+          ctx.roundRect(cx - tw / 2, ty - 7, tw, 14, 4);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = '#fecdd3';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(tag, cx, ty);
+        }
+      } else if (tok.role === 'crawler') {
+        const hm = getTokenHealthMetrics(tok);
+        if (hm.curHp <= 0) {
+          // Dead Crawler: Blue X marker on minimap (even through smoke/walls)
+          const xr = Math.max(7, gs * 0.19);
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 3 / uiState.camZoom;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(cx - xr, cy - xr);
+          ctx.lineTo(cx + xr, cy + xr);
+          ctx.moveTo(cx + xr, cy - xr);
+          ctx.lineTo(cx - xr, cy + xr);
+          ctx.stroke();
+        } else if (!inLiveLos) {
+          // Out-of-LOS Crawler / Ally: Blue Dot on minimap
+          const br = Math.max(6, gs * 0.15);
+          ctx.fillStyle = '#38bdf8';
+          ctx.strokeStyle = '#e0f2fe';
+          ctx.lineWidth = 1.6 / uiState.camZoom;
+          ctx.beginPath();
+          ctx.arc(cx, cy, br, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+
+          if (detProfile.hasFindCrawler) {
+            const cTag = tok.name || 'Crawler';
+            ctx.font = 'bold 9.5px JetBrains Mono, monospace';
+            const tw = ctx.measureText(cTag).width + 8;
+            const ty = cy + br + 9;
+            ctx.fillStyle = 'rgba(7, 9, 14, 0.88)';
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)';
+            ctx.lineWidth = 1 / uiState.camZoom;
+            ctx.beginPath();
+            ctx.roundRect(cx - tw / 2, ty - 7, tw, 14, 4);
+            ctx.fill();
+            ctx.stroke();
+            ctx.fillStyle = '#bae6fd';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(cTag, cx, ty);
+          }
+        }
       }
     });
 
-    // B. Carve out ALL light sources through the Crawler LOS clip mask!
-    //    Because this is clipped to Crawler LOS (not whether the source center is visible),
-    //    crawlers automatically see BOTH distant light sources AND light spilling around walls/corners!
-    lightSources.forEach(src => {
-      const unclippedFt = src.dimOnly ? src.radiusFt : src.radiusFt * 2;
-      const effMaxFt = (src.maxReachFt && src.maxReachFt > 0) ? Math.min(unclippedFt, src.maxReachFt) : unclippedFt;
-      const maxPx = (effMaxFt / 5) * gs;
-      const sx = src.wx * uiState.camZoom + uiState.camX;
-      const sy = src.wy * uiState.camZoom + uiState.camY;
-      const sr = maxPx * uiState.camZoom;
-      const poly = computeVisibilityPolygon(src.wx, src.wy, maxPx, blockingWalls, src.angleDeg, src.facingDeg);
-      const screenPoly = poly.map(p => ({ x: p.x * uiState.camZoom + uiState.camX, y: p.y * uiState.camZoom + uiState.camY }));
-      const grad = fowCtx.createRadialGradient(sx, sy, sr * 0.25, sx, sy, sr);
-      grad.addColorStop(0, 'rgba(0, 0, 0, 1)');
-      grad.addColorStop(0.7, 'rgba(0, 0, 0, 0.92)');
-      grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-      fowCtx.fillStyle = grad;
-      traceRayPolygonPath(fowCtx, sx, sy, screenPoly, src.angleDeg >= 359.5);
-      fowCtx.fill();
-    });
-
-    fowCtx.restore();
-    fowCtx.restore();
-    ctx.drawImage(fowCanvas, 0, 0);
+    ctx.restore();
   }
 
   ctx.save();
@@ -2165,6 +3528,19 @@ canvas.addEventListener('pointerdown', e => {
   const gs = Math.max(16, Math.min(240, Number(scene.gridSize) || 56));
   const { wx, wy } = screenToWorld(e.clientX, e.clientY);
   const { gx, gy } = worldToGrid(wx, wy);
+  uiState.hoverGx = gx;
+  uiState.hoverGy = gy;
+
+  if (!IS_PLAYER_WINDOW && uiState.canvasTool === 'floor') {
+    if (e.button === 2) {
+      adjustFloorAtGrid(gx, gy, -5, false);
+      return;
+    }
+    if (e.button === 0) {
+      applyFloorBrushAtGrid(gx, gy, e);
+      return;
+    }
+  }
 
   if (e.button === 2) {
     if (!IS_PLAYER_WINDOW && uiState.canvasTool === 'wall') {
@@ -2248,7 +3624,11 @@ canvas.addEventListener('pointerdown', e => {
   const hitTok = findTokenAtWorldOrGrid(wx, wy, gx, gy, gs);
   if (hitTok) {
     uiState.selectedTokenId = hitTok.id;
-    const canDragThisToken = !IS_PLAYER_WINDOW || (hitTok.role === 'crawler' && hitTok.id === uiState.claimedCrawlerId);
+    const pPerm = (IS_PLAYER_WINDOW && hitTok.role === 'crawler') ? getCrawlerPhasePermissions(hitTok) : { locked: false };
+    const canDragThisToken = !IS_PLAYER_WINDOW || (hitTok.role === 'crawler' && hitTok.id === uiState.claimedCrawlerId && !pPerm.locked);
+    if (IS_PLAYER_WINDOW && hitTok.role === 'crawler' && hitTok.id === uiState.claimedCrawlerId && pPerm.locked) {
+      showVttToast(pPerm.bannerText || '🔒 Wait for Step 2 (React) or Step 4 (Crawler Action) to move!');
+    }
     if (canDragThisToken) {
       uiState.isDraggingToken = true;
       uiState.draggedTokenId = hitTok.id;
@@ -2300,7 +3680,7 @@ function escapeHtmlAttr(str) {
 
 function lookupEffectCatalogDetails(kind, rawLabel) {
   const label = String(rawLabel || '').trim();
-  const stripped = label.replace(/^\[Passive\]\s*/i, '').trim();
+  const stripped = label.replace(/^\[(?:Passive|Aura)\]\s*/i, '').trim();
   const baseNoParen = stripped.replace(/\s*\([^)]*\)\s*/g, '').trim();
 
   if (kind === 'buff') {
@@ -2316,6 +3696,17 @@ function lookupEffectCatalogDetails(kind, rawLabel) {
         category: match.category || '',
         color: match.color || '#10b981',
         description: match.description || 'Active beneficial effect.'
+      };
+    }
+    const spMatch = (appState?.spells || []).find(sp => String(sp.name || '').trim().toLowerCase() === baseNoParen.toLowerCase());
+    if (spMatch) {
+      return {
+        title: stripped,
+        kindLabel: 'Active Spell Aura',
+        duration: 'While inside Aura Radius',
+        category: spMatch.tags || 'Aura',
+        color: '#38bdf8',
+        description: spMatch.description || spMatch.rank1Effect || 'Active proximity spell aura.'
       };
     }
     const sk = (appState?.skills || []).find(s => String(s.name || '').trim().toLowerCase() === baseNoParen.toLowerCase());
@@ -2527,13 +3918,54 @@ function updateCanvasHoverCard(e, scene, wx, wy, gx, gy, gs) {
   }
   const hitTok = findTokenAtWorldOrGrid(wx, wy, gx, gy, gs);
   if (hitTok) {
+    if (IS_PLAYER_WINDOW && hitTok.role === 'mob') {
+      const blockingWalls = getBlockingWallSegments(scene);
+      const crawlerVisList = getCrawlerVisionSources(scene, gs, blockingWalls);
+      const tx = (hitTok.gx + 0.5) * gs;
+      const ty = (hitTok.gy + 0.5) * gs;
+      const inLos = isPointSeenInLightOrSight(tx, ty, scene, gs, crawlerVisList, blockingWalls);
+      if (!inLos) {
+        const det = typeof isMobDetectedOnMinimap === 'function' ? isMobDetectedOnMinimap(hitTok, scene) : { detected: false };
+        if (!det.detected) {
+          card.classList.add('hidden');
+          return;
+        }
+        card.innerHTML = `
+          <div class="flex items-center justify-between gap-1.5 border-b border-rose-500/40 pb-1 mb-1">
+            <span class="font-bold text-xs text-rose-300">🔴 Minimap Blip</span>
+            <span class="text-[9.5px] font-mono text-amber-300">${escapeHtmlAttr(det.reason)}</span>
+          </div>
+          ${det.showSizeAndKnown ? `
+            <div class="text-[10px] font-mono text-slate-200">Size: <b>${escapeHtmlAttr(det.sizeLabel)}</b></div>
+            <div class="text-[10px] font-mono ${det.known ? 'text-emerald-300' : 'text-amber-300'}">Type: <b>${det.known ? `Known (${escapeHtmlAttr(hitTok.name)})` : 'Unknown Mob'}</b></div>
+          ` : `
+            <div class="text-[10px] font-mono text-slate-300">Hostile signature detected out of sight.</div>
+          `}
+        `;
+        card.style.left = `${Math.min(window.innerWidth - 252, e.clientX + 14)}px`;
+        card.style.top = `${Math.min(window.innerHeight - 110, e.clientY + 14)}px`;
+        card.classList.remove('hidden');
+        return;
+      }
+    }
     const hm = getTokenHealthMetrics(hitTok);
     const isHiddenMob = IS_PLAYER_WINDOW && hitTok.role === 'mob';
     const illum = getIlluminationBuffForToken(hitTok);
+    const hoverImg = getResolvedTokenPortraitImage(hitTok);
+    const hoverPortraitSrc = hitTok.portraitDataUrl || hitTok.portraitUrl || (hoverImg && hoverImg.src) || '';
+    const hoverBorderCol = hitTok.color || (hitTok.role === 'crawler' ? '#38bdf8' : '#ef4444');
     card.innerHTML = `
-      <div class="flex items-center justify-between gap-1.5 border-b border-slate-800 pb-1 mb-1">
-        <span class="font-bold text-xs text-slate-100 truncate">${hitTok.iconSymbol || '⚔️'} ${hitTok.name}</span>
-        <span class="text-[10px] font-mono text-amber-400 shrink-0">Lvl ${hitTok.level || 1}</span>
+      <div class="flex items-center gap-2 border-b border-slate-800 pb-1.5 mb-1">
+        <div class="w-9 h-9 rounded-lg bg-dungeon-900 border-2 flex items-center justify-center overflow-hidden shrink-0" style="border-color:${escapeHtmlAttr(hoverBorderCol)}">
+          ${hoverPortraitSrc
+            ? `<img src="${escapeHtmlAttr(hoverPortraitSrc)}" alt="${escapeHtmlAttr(hitTok.name || 'Unit')}" class="w-full h-full object-cover" />`
+            : `<span class="text-base">${hitTok.iconSymbol || (hitTok.role === 'crawler' ? '⚔️' : '👹')}</span>`
+          }
+        </div>
+        <div class="flex-1 min-w-0 flex items-center justify-between gap-1.5">
+          <span class="font-bold text-xs text-slate-100 truncate">${hitTok.name}</span>
+          <span class="text-[10px] font-mono text-amber-400 shrink-0">Lvl ${hitTok.level || 1}</span>
+        </div>
       </div>
       <div class="text-[10px] font-mono text-slate-300 flex justify-between">
         <span>❤️ ${isHiddenMob ? `${hm.pct}% HP` : `${hm.curHp}/${hm.maxHp} HP`}</span>
@@ -2672,13 +4104,14 @@ canvas.addEventListener('pointerup', e => {
         if (wallBlock) {
           showVttToast('🧱 Movement blocked by closed wall or door!');
         } else if (isCombat && tok.role === 'crawler' && pathSteps === undefined) {
-          showVttToast(`⚠️ Out of movement range (${maxAllowedFt}ft max) — ${tok.name} snapped back!`);
+          showVttToast(IS_PLAYER_WINDOW && getCrawlerPhasePermissions(tok).canStepOnly ? `⚡ Step 2 (React): Only a ${maxAllowedFt}ft Interrupt Step is allowed!` : `⚠️ Out of movement range (${maxAllowedFt}ft max) — ${tok.name} snapped back!`);
         } else {
           const movedFt = (isCombat && tok.role === 'crawler' && pathSteps !== null)
             ? pathSteps * 5
             : calcGridDistanceFt(tok.gx, tok.gy, targetGx, targetGy);
           tok.gx = targetGx;
           tok.gy = targetGy;
+          if (typeof syncTokenElevationToTerrainOnMove === 'function') syncTokenElevationToTerrainOnMove(tok, scene);
           applyAutomaticMovementEconomy(tok, movedFt);
           exploredMemDirty = true;
           if (IS_PLAYER_WINDOW) {

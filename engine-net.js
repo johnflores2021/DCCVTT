@@ -314,7 +314,7 @@ function startHostingOnlineRoom() {
       } else if (msg.type === 'PLAYER_CAST_ABILITY' && msg.tokenId) {
         if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
           if (typeof executeRemotePlayerAbilityCast === 'function') {
-            executeRemotePlayerAbilityCast(msg.tokenId, msg.kind, msg.entryId, msg.targetId);
+            executeRemotePlayerAbilityCast(msg.tokenId, msg.kind, msg.entryId, msg.targetId, msg.rollMode || 'normal');
           }
         }
       } else if (msg.type === 'PLAYER_DEPLOY_AND_CLAIM' && msg.templateId) {
@@ -341,6 +341,44 @@ function startHostingOnlineRoom() {
           if (typeof executeRemotePlayerUntrainedSkill === 'function') {
             executeRemotePlayerUntrainedSkill(msg.tokenId, msg.entryId, msg.targetId);
           }
+        }
+      } else if (msg.type === 'PLAYER_UPDATE_HOTLIST' && msg.tokenId && Array.isArray(msg.hotlist)) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          applyPlayerHotlistUpdate(msg.tokenId, msg.hotlist);
+        }
+      } else if (msg.type === 'PLAYER_UPDATE_INVENTORY' && msg.tokenId && Array.isArray(msg.inventory)) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          applyPlayerInventoryUpdate(msg.tokenId, msg.inventory);
+        }
+      } else if (msg.type === 'PLAYER_LOOT_MOB' && msg.tokenId) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          if (typeof executeMobLootOnHost === 'function') executeMobLootOnHost(msg.tokenId, msg.mobId);
+        }
+      } else if (msg.type === 'PLAYER_OPEN_LOOT_BOX' && msg.tokenId) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          if (typeof executeOpenLootBoxOnHost === 'function') executeOpenLootBoxOnHost(msg.tokenId, msg.boxInvId);
+        }
+      } else if (msg.type === 'PLAYER_SPEND_STAT_POINT' && msg.tokenId) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          if (typeof spendCrawlerStatPointOnHost === 'function') spendCrawlerStatPointOnHost(msg.tokenId, msg.statKey);
+        }
+      } else if (msg.type === 'PLAYER_SUBMIT_GRIND' && msg.tokenId) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          if (typeof executeGrindForCrawlerOnHost === 'function') {
+            executeGrindForCrawlerOnHost(msg.tokenId, msg.hours, msg.skillId, true, true);
+          }
+        }
+      } else if (msg.type === 'PLAYER_COMBAT_ACTION' && msg.tokenId) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          if (typeof executeCrawlerSupportActionOnHost === 'function') executeCrawlerSupportActionOnHost(msg.tokenId, msg.actionKind, true);
+        }
+      } else if (msg.type === 'PLAYER_DECLARE_EVADE' && msg.tokenId) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          if (typeof executeCrawlerDeclareEvadeOnHost === 'function') executeCrawlerDeclareEvadeOnHost(msg.tokenId, true);
+        }
+      } else if (msg.type === 'PLAYER_CANCEL_EVADE' && msg.tokenId) {
+        if (!conn._claimedTokenId || conn._claimedTokenId === msg.tokenId) {
+          if (typeof executeCrawlerCancelEvadeOnHost === 'function') executeCrawlerCancelEvadeOnHost(msg.tokenId, true);
         }
       }
     });
@@ -585,15 +623,54 @@ function sendPlayerCreateCrawlerToHost(crawlerPayload) {
 }
 
 
-function sendPlayerCastAbilityToHost(tokenId, kind, entryId, targetId) {
+function sendPlayerCastAbilityToHost(tokenId, kind, entryId, targetId, rollMode = 'normal') {
   if (!tokenId || !entryId) return;
   if (onlineClientConn && onlineClientConn.open) {
     try {
-      onlineClientConn.send({ type: 'PLAYER_CAST_ABILITY', tokenId, kind, entryId, targetId });
+      onlineClientConn.send({ type: 'PLAYER_CAST_ABILITY', tokenId, kind, entryId, targetId, rollMode });
     } catch (_) {}
   } else if (syncChannel) {
     try {
-      syncChannel.postMessage({ type: 'PLAYER_CAST_ABILITY', tokenId, kind, entryId, targetId });
+      syncChannel.postMessage({ type: 'PLAYER_CAST_ABILITY', tokenId, kind, entryId, targetId, rollMode });
+    } catch (_) {}
+  }
+}
+
+function sendPlayerCombatActionToHost(tokenId, actionKind, targetMobId = '', parleySkillKey = '') {
+  if (!tokenId || !actionKind) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_COMBAT_ACTION', tokenId, actionKind, targetMobId, parleySkillKey });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_COMBAT_ACTION', tokenId, actionKind, targetMobId, parleySkillKey });
+    } catch (_) {}
+  }
+}
+
+function sendPlayerDeclareEvadeToHost(tokenId) {
+  if (!tokenId) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_DECLARE_EVADE', tokenId });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_DECLARE_EVADE', tokenId });
+    } catch (_) {}
+  }
+}
+
+function sendPlayerCancelEvadeToHost(tokenId) {
+  if (!tokenId) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_CANCEL_EVADE', tokenId });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_CANCEL_EVADE', tokenId });
     } catch (_) {}
   }
 }
@@ -628,6 +705,88 @@ function sendPlayerTryUntrainedSkillToHost(tokenId, entryId, targetId = '') {
   } else if (syncChannel) {
     try {
       syncChannel.postMessage({ type: 'PLAYER_TRY_UNTRAINED_SKILL', tokenId, entryId, targetId });
+    } catch (_) {}
+  }
+}
+
+
+function sendPlayerHotlistUpdateToHost(tokenId, hotlistArr) {
+  if (!tokenId || !Array.isArray(hotlistArr)) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_UPDATE_HOTLIST', tokenId, hotlist: hotlistArr });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_UPDATE_HOTLIST', tokenId, hotlist: hotlistArr });
+    } catch (_) {}
+  }
+}
+
+
+function sendPlayerInventoryUpdateToHost(tokenId, invArr) {
+  if (!tokenId || !Array.isArray(invArr)) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_UPDATE_INVENTORY', tokenId, inventory: invArr });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_UPDATE_INVENTORY', tokenId, inventory: invArr });
+    } catch (_) {}
+  }
+}
+
+
+function sendPlayerLootMobToHost(tokenId, mobId) {
+  if (!tokenId || !mobId) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_LOOT_MOB', tokenId, mobId });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_LOOT_MOB', tokenId, mobId });
+    } catch (_) {}
+  }
+}
+
+function sendPlayerOpenLootBoxToHost(tokenId, boxInvId) {
+  if (!tokenId || !boxInvId) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_OPEN_LOOT_BOX', tokenId, boxInvId });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_OPEN_LOOT_BOX', tokenId, boxInvId });
+    } catch (_) {}
+  }
+}
+
+
+function sendPlayerSpendStatPointToHost(tokenId, statKey) {
+  if (!tokenId || !statKey) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_SPEND_STAT_POINT', tokenId, statKey });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_SPEND_STAT_POINT', tokenId, statKey });
+    } catch (_) {}
+  }
+}
+
+function sendPlayerGrindSubmitToHost(tokenId, sessionId, hours, skillId) {
+  if (!tokenId || !skillId) return;
+  if (onlineClientConn && onlineClientConn.open) {
+    try {
+      onlineClientConn.send({ type: 'PLAYER_SUBMIT_GRIND', tokenId, sessionId, hours, skillId });
+    } catch (_) {}
+  } else if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: 'PLAYER_SUBMIT_GRIND', tokenId, sessionId, hours, skillId });
     } catch (_) {}
   }
 }
@@ -978,6 +1137,40 @@ function importParsedRowsIntoCatalog(rows, targetHint = 'auto') {
         description: String(r.Description || '').trim()
       });
       count++;
+    } else if (t.includes('bestiary') || t.includes('mob') || ('Evade' in r) || ('Surprise' in r) || ('Neighborhood' in r)) {
+      const maxPips = Math.max(1, Number(r['Max Pips'] || r.maxPips || r.Pips || 3) || 3);
+      const hpPerPip = Math.max(1, Number(r['HP/Pip'] || r.hpPerPip || 2) || 2);
+      appState.bestiary.push({
+        templateId: `tpl_imp_${Date.now()}_${idx}`,
+        name,
+        role: 'mob',
+        tier: String(r.Tier || r.tier || (/boss/i.test(String(r.Classification || '')) ? 'Boss' : 'Mob')).trim(),
+        neighborhood: String(r.Neighborhood || r.neighborhood || r.Area || '').trim(),
+        quarter: String(r.Quarter || r.quarter || '').trim(),
+        classification: String(r.Classification || r.classification || 'Mob; Medium (4)').trim(),
+        level: Math.max(1, Number(r.Level || r.level || 1) || 1),
+        maxPips,
+        hpPerPip,
+        maxMana: Math.max(0, Number(r['Max Mana'] || r.maxMana || 0) || 0),
+        surprise: String(r.Surprise || r.surprise || '12+F').trim(),
+        evade: String(r.Evade || r.evade || '12+F').trim(),
+        move: String(r.Move || r.move || '30+S').trim(),
+        dr: String(r.DR ?? r.dr ?? '1').trim(),
+        stats: {
+          Str: String(r.Str || '3 (+2)'),
+          Int: String(r.Int || '2 (+1)'),
+          Con: String(r.Con || '3 (+2)'),
+          Dex: String(r.Dex || '3 (+2)'),
+          Cha: String(r.Cha || '1 (+1)')
+        },
+        iconSymbol: String(r.Icon || r.iconSymbol || '👹').trim(),
+        color: String(r.Color || r.color || '#ef4444').trim(),
+        lore: String(r.Lore || r.lore || '').trim(),
+        aiCommentary: String(r['AI Commentary'] || r.aiCommentary || '').trim(),
+        attacks: Array.isArray(r.attacks) ? r.attacks : (r.Attack ? [{ name: String(r.Attack), hitBonus: String(r.Hit || '12+F'), rangeFt: Number(r.Range || 5) || 5, damage: String(r.Damage || '1d6'), special: String(r.Special || '') }] : []),
+        notes: String(r.Notes || r.notes || '').trim()
+      });
+      count++;
     } else {
       appState.skills.push({
         id: `sk_imp_${Date.now()}_${idx}`,
@@ -1044,6 +1237,38 @@ function processBulkPasteImport() {
     showVttToast(`📥 Imported ${total} pasted entries!`);
   } catch (err) {
     showVttToast(`⚠️ Paste import error: ${err.message}`);
+  }
+}
+
+
+
+function sendPrivateAlertToCrawler(tokenId, title, bodyText, actionLabel = '', actionKind = '', actionArg = '') {
+  if (!tokenId) return;
+  const payload = {
+    type: 'PRIVATE_CRAWLER_ALERT',
+    tokenId,
+    title: String(title || 'Trap Intel'),
+    body: String(bodyText || ''),
+    actionLabel: String(actionLabel || ''),
+    actionKind: String(actionKind || ''),
+    actionArg: String(actionArg || ''),
+    timestamp: Date.now()
+  };
+  if (IS_PLAYER_WINDOW) {
+    if (uiState.claimedCrawlerId === tokenId && typeof showPrivateCrawlerAlertPopup === 'function') {
+      showPrivateCrawlerAlertPopup(payload);
+    }
+    return;
+  }
+  if (uiState.selectedTokenId === tokenId && typeof showPrivateCrawlerAlertPopup === 'function') {
+    showPrivateCrawlerAlertPopup(payload);
+  }
+  if (Array.isArray(onlineHostConnections)) {
+    onlineHostConnections.forEach(c => {
+      if (c && c.open && c._isAuthenticated && c._claimedTokenId === tokenId) {
+        try { c.send(payload); } catch (_) {}
+      }
+    });
   }
 }
 

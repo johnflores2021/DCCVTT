@@ -1,6 +1,63 @@
 // =========================================================================
 // 7. SCENE, TOOL, AND HUD UI RENDERERS
 // =========================================================================
+
+function applyPortraitDataUrlToTarget(targetId, isTemplate, dataUrl) {
+  if (typeof tokenPortraitCache !== 'undefined') tokenPortraitCache.clear();
+  if (isTemplate) {
+    const tpl = (appState?.bestiary || []).find(b => b.templateId === targetId);
+    if (tpl) tpl.portraitDataUrl = dataUrl || '';
+    const sc = getActiveScene();
+    (sc?.tokens || []).forEach(t => {
+      if (t.templateId === targetId) t.portraitDataUrl = dataUrl || '';
+    });
+  } else {
+    const tok = getActiveScene()?.tokens.find(t => t.id === targetId);
+    if (tok) {
+      tok.portraitDataUrl = dataUrl || '';
+      if (tok.templateId) {
+        const tpl = (appState?.bestiary || []).find(b => b.templateId === tok.templateId);
+        if (tpl) tpl.portraitDataUrl = dataUrl || '';
+      }
+    }
+  }
+  commitStateChange();
+}
+
+function uploadTokenPortraitImage(targetId, event, isTemplate = false) {
+  const file = event?.target?.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const img = new Image();
+    img.onload = () => {
+      const size = 160;
+      const c = document.createElement('canvas');
+      c.width = size;
+      c.height = size;
+      const cctx = c.getContext('2d');
+      const scale = Math.max(size / img.naturalWidth, size / img.naturalHeight);
+      const dw = img.naturalWidth * scale;
+      const dh = img.naturalHeight * scale;
+      cctx.drawImage(img, (size - dw) / 2, (size - dh) / 2, dw, dh);
+      const smallUrl = c.toDataURL('image/jpeg', 0.84);
+      applyPortraitDataUrlToTarget(targetId, isTemplate, smallUrl);
+      showVttToast('🖼️ Updated token portrait!');
+    };
+    img.onerror = () => {
+      applyPortraitDataUrlToTarget(targetId, isTemplate, ev.target.result);
+      showVttToast('🖼️ Attached token portrait!');
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearTokenPortraitImage(targetId, isTemplate = false) {
+  applyPortraitDataUrlToTarget(targetId, isTemplate, '');
+  showVttToast('Cleared custom portrait (reverted to emoji / tokens folder)');
+}
+
 function selectToken(tokenId) {
   uiState.selectedTokenId = tokenId;
   uiState.activeCastPanel = null;
@@ -10,23 +67,27 @@ function selectToken(tokenId) {
 
 function setCanvasTool(tool) {
   uiState.canvasTool = tool;
-  if (tool !== 'dropLight') {
-    uiState.selectedLightId = null;
-  }
-  ['select', 'wall', 'dropLight', 'measure'].forEach(t => {
-    const btn = document.getElementById(`tool${t.charAt(0).toUpperCase() + t.slice(1)}Btn`);
+  ['select', 'wall', 'floor', 'dropLight', 'measure'].forEach(t => {
+    const idMap = { select: 'toolSelectBtn', wall: 'toolWallBtn', floor: 'toolFloorBtn', dropLight: 'toolDropLightBtn', measure: 'toolMeasureBtn' };
+    const btn = document.getElementById(idMap[t]);
     if (!btn) return;
-    btn.className = t === tool
+    const active = t === tool;
+    btn.className = active
       ? 'px-2.5 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-bold text-xs transition'
-      : 'px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition';
+      : 'px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold text-xs transition';
   });
-  const wallSub = document.getElementById('wallToolSubBar');
-  const pop = document.getElementById('gridCalibratorPopover');
-  if (wallSub) wallSub.classList.toggle('hidden', tool !== 'wall');
-  if (pop) pop.classList.toggle('hidden', tool !== 'dropLight');
-  syncLightCalibratorControls();
+  const wallBar = document.getElementById('wallToolSubBar');
+  if (wallBar) wallBar.classList.toggle('hidden', tool !== 'wall');
+  const floorBar = document.getElementById('floorToolSubBar');
+  if (floorBar) floorBar.classList.toggle('hidden', tool !== 'floor');
+  showVttToast(
+    tool === 'wall' ? '🧱 Wall/Door tool: Left-drag to draw • Right-click segment to delete • Click door to toggle'
+      : tool === 'floor' ? '⛰️ Floor ±5ft tool: Click tile to Raise +5ft • Shift/Right-Click to Lower -5ft • Alt+Click for 0ft'
+      : tool === 'dropLight' ? '🔥 Drop Light tool: Click map to place a light source'
+      : tool === 'measure' ? '📏 Ruler tool: Drag on map to measure distance in 5ft squares'
+      : '✋ Select / Move tool active'
+  );
 }
-
 function setWallDrawKind(kind) {
   uiState.wallDrawKind = kind;
   const wBtn = document.getElementById('wallTypeWallBtn');
@@ -229,6 +290,8 @@ function createNewMapScene() {
     exploredSpots: [],
     ghostMarkers: [],
     mapObjects: [],
+    declaredMobAttacks: [],
+    persistentEffects: [],
     tokens: []
   };
   appState.mapScenes.push(newScene);
@@ -398,21 +461,29 @@ function clearAllBoardTokens() {
   commitStateChange();
 }
 
-function resetToDefaultEncounter() {
+async function resetToDefaultEncounter() {
+  if (typeof createAutoBackupSlot === 'function') {
+    await createAutoBackupSlot('Pre-Reset');
+  }
   localStorage.removeItem(STORAGE_KEY);
   appState = createInitialState();
   uiState.selectedTokenId = null;
   syncLoadedMapImage();
   commitStateChange();
-  showVttToast('↺ Reset to clean DCC arena');
+  if (typeof refreshSaveStatesList === 'function') refreshSaveStatesList();
+  showVttToast('↺ Reset to clean DCC arena (Auto-Backup saved)');
 }
 
 function exportSessionJson() {
-  const blob = new Blob([JSON.stringify(appState, null, 2)], { type: 'application/json' });
+  const safePayload = typeof buildSanitizedSaveSnapshot === 'function'
+    ? buildSanitizedSaveSnapshot()
+    : appState;
+  const blob = new Blob([JSON.stringify(safePayload, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `DCC_VTT_Campaign_${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
+  showVttToast('💾 Exported sanitized Campaign JSON');
 }
 
 function toggleHostilesRailCollapse() {
@@ -437,10 +508,57 @@ function renderPhaseTrackerBar() {
   if (roundEl) roundEl.textContent = appState.round ?? 0;
   const clockEl = document.getElementById('collapseClockDisplay');
   if (clockEl) clockEl.textContent = formatCollapseClock(appState.collapseRemainingMinutes);
+  const pClockEl = document.getElementById('playerCollapseClockVal');
+  if (pClockEl) pClockEl.textContent = formatCollapseClock(appState.collapseRemainingMinutes);
+  const shift = appState.lastClockShift;
+  const recentShift = shift && shift.badgeText && (Date.now() - (shift.timestamp || 0) < 120000);
+  const deltaBadge = document.getElementById('clockDeltaBadge');
+  if (deltaBadge) {
+    deltaBadge.classList.toggle('hidden', !recentShift);
+    if (recentShift) deltaBadge.textContent = shift.badgeText;
+  }
+  const pActBadge = document.getElementById('playerClockActivityBadge');
+  if (pActBadge) {
+    if (recentShift) {
+      pActBadge.textContent = shift.badgeText;
+      pActBadge.className = 'text-amber-300 font-bold truncate max-w-[190px]';
+    } else {
+      pActBadge.textContent = 'Moves on Rests & Grinding';
+      pActBadge.className = 'text-slate-400';
+    }
+  }
 
   const nextBtn = document.getElementById('nextPhaseBtn');
   if (nextBtn) {
     nextBtn.textContent = appState.round === 0 ? 'Start Combat →' : 'Next Phase →';
+  }
+  const expBtn = document.getElementById('toggleExplorationModeBtn');
+  if (expBtn) {
+    const isExp = isExplorationModeActive();
+    expBtn.textContent = isExp ? '🧭 Explore: ON' : '🧭 Explore: OFF';
+    expBtn.className = isExp
+      ? 'px-2 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/50 text-cyan-200 text-xs font-bold transition shrink-0'
+      : 'px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 text-xs font-semibold transition shrink-0';
+  }
+  const lockBtn = document.getElementById('togglePhaseLockBtn');
+  if (lockBtn) {
+    const isOn = appState.phaseLockEnabled !== false;
+    lockBtn.textContent = isOn ? '🔒 Phase Lock: ON' : '🔓 Phase Lock: OFF';
+    lockBtn.className = isOn
+      ? 'px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-xs font-semibold transition'
+      : 'px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 text-xs font-semibold transition';
+  }
+  const mmBtn = document.getElementById('toggleMinimapBtn');
+  if (mmBtn) {
+    const isOff = Boolean(appState.minimapOffline);
+    mmBtn.textContent = isOff ? '⚠️ Minimap: OFFLINE' : '🗺️ Minimap: ON';
+    mmBtn.className = isOff
+      ? 'px-2.5 py-1.5 rounded-xl bg-rose-600/30 hover:bg-rose-600/45 border border-rose-400/70 text-rose-200 text-xs font-bold transition animate-pulse'
+      : 'px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold transition';
+  }
+  const mmBadge = document.getElementById('playerMinimapOfflineBadge');
+  if (mmBadge) {
+    mmBadge.classList.toggle('hidden', !(IS_PLAYER_WINDOW && Boolean(appState.minimapOffline)));
   }
 
   const pillsEl = document.getElementById('phasePillsContainer');
@@ -504,7 +622,7 @@ function renderPlayerBottomHud() {
                 </div>
                 ${((m.buffs && m.buffs.length) || (m.statuses && m.statuses.length)) ? `
                   <div class="flex flex-wrap gap-1 mt-1 max-w-[140px]">
-                    ${(m.buffs || []).map(b => `<span onmouseenter="showEffectHoverInfo('buff', '${encodeURIComponent(String(b))}')" onmouseleave="hideEffectHoverInfo()" class="cursor-help px-1 rounded-full text-[8px] font-semibold bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 truncate max-w-[65px]">${String(b).replace(/^\[Passive\]\s*/i, '')}</span>`).join('')}
+                    ${(m.buffs || []).map(b => `<span onmouseenter="showEffectHoverInfo('buff', '${encodeURIComponent(String(b))}')" onmouseleave="hideEffectHoverInfo()" class="cursor-help px-1 rounded-full text-[8px] font-semibold bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 truncate max-w-[65px]">${String(b).replace(/^\[(?:Passive|Aura)\]\s*/i, '')}</span>`).join('')}
                     ${(m.statuses || []).map(s => `<span onmouseenter="showEffectHoverInfo('debuff', '${encodeURIComponent(String(s))}')" onmouseleave="hideEffectHoverInfo()" class="cursor-help px-1 rounded-full text-[8px] font-semibold bg-rose-500/20 border border-rose-500/40 text-rose-200 truncate max-w-[65px]">${s}</span>`).join('')}
                   </div>
                 ` : ''}
@@ -536,7 +654,7 @@ function renderPlayerBottomHud() {
               <div class="flex flex-wrap gap-1 mt-1 max-w-[200px]">
                 ${(c.buffs || []).map(b => {
                   const enc = encodeURIComponent(String(b));
-                  const shortName = String(b).replace(/^\[Passive\]\s*/i, '');
+                  const shortName = String(b).replace(/^\[(?:Passive|Aura)\]\s*/i, '');
                   return `<span onmouseenter="showEffectHoverInfo('buff', '${enc}')" onmouseleave="hideEffectHoverInfo()" class="cursor-help px-1.5 py-0.2 rounded-full text-[9px] font-semibold bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 truncate max-w-[92px]">${shortName}</span>`;
                 }).join('')}
                 ${(c.statuses || []).map(s => {
@@ -584,7 +702,12 @@ function adjustTokenHealth(tokenId, deltaHp) {
     tok.shieldPips = Math.max(0, tok.shieldPips - absorbedPips);
     remaining = Math.min(0, remaining + absorbedPips * hm.hpPerPip);
   }
-  tok.currentHp = Math.max(0, Math.min(hm.maxHp, hm.curHp + remaining));
+  const prevHp = hm.curHp;
+  let nextHp = Math.max(0, Math.min(hm.maxHp, hm.curHp + remaining));
+  if (tok.role === 'crawler' && typeof handleCrawlerZeroHpAndCockroach === 'function') {
+    nextHp = handleCrawlerZeroHpAndCockroach(tok, prevHp, nextHp);
+  }
+  tok.currentHp = nextHp;
   const newHm = getTokenHealthMetrics(tok);
   tok.currentPips = newHm.filledPips;
   syncSwarmTokenGridSpan(tok);
@@ -942,12 +1065,52 @@ function renderAbilityCatalogEditorHtml(kind, entry) {
   `;
 }
 
+function computeScaledAttackDamageFormula(baseExpr, unlockedUpgrades) {
+  let expr = String(baseExpr || '1d6').trim();
+  const upgrades = Array.isArray(unlockedUpgrades) ? unlockedUpgrades : [];
+  let extraDiceCount = 0;
+  let extraDieSides = 0;
+
+  // Match "+1d6 base damage", "+2d4 base damage", "(+1D6)", "(+1D12)" in unlocked Rank 5/10/15 upgrades
+  upgrades.forEach(u => {
+    const str = String(u || '');
+    const mBase = str.match(/\+\s*(\d+)d(\d+)\s*base\s*damage/i) || str.match(/\(\s*\+\s*(\d+)d(\d+)[^)]*\)/i);
+    if (mBase) {
+      const addCnt = parseInt(mBase[1], 10);
+      const sides = parseInt(mBase[2], 10);
+      const baseMatch = expr.match(/(\d+)d(\d+)/i);
+      if (baseMatch && parseInt(baseMatch[2], 10) === sides) {
+        const curCnt = parseInt(baseMatch[1], 10);
+        expr = expr.replace(/(\d+)d(\d+)/i, `${curCnt + addCnt}d${sides}`);
+      } else {
+        extraDiceCount += addCnt;
+        extraDieSides = sides;
+      }
+    }
+  });
+
+  if (extraDiceCount > 0 && extraDieSides > 0) {
+    expr = `${expr} + ${extraDiceCount}d${extraDieSides}`;
+  }
+  return expr;
+}
+
+function countUnlockedRankDamageDice(entry, unlockedUpgrades) {
+  const texts = [entry?.rank1Effect || '', entry?.description || '', ...(unlockedUpgrades || [])];
+  let count = 0;
+  texts.forEach(t => {
+    const matches = [...String(t || '').matchAll(/add\s+(\d+)\s+(?:[a-z0-9’' -]+\s+)?rank\s+damage\s+di(?:e|ce)/gi)];
+    matches.forEach(m => { count += parseInt(m[1], 10) || 1; });
+  });
+  return count;
+}
+
 function analyzeAbilityEffects(caster, kind, entryId, rank) {
   const catalog = kind === 'skill' ? (appState?.skills || []) : (appState?.spells || []);
   const entry = catalog.find(e => e.id === entryId);
   if (!entry) return { entry: null, isPurePassive: false };
 
-  const r = Math.max(1, Math.min(15, Number(rank) || 1));
+  const r = Math.max(1, Math.min(20, Number(rank) || 1));
   const unlocked = (entry.upgrades || []).filter(u => {
     const m = String(u).match(/^Rank\s+(\d+)/i);
     return !m || r >= parseInt(m[1], 10);
@@ -986,9 +1149,12 @@ function analyzeAbilityEffects(caster, kind, entryId, rank) {
 
   // Damage detection (explicit first, fallback to text)
   const isAttack = explicitType === 'attack' || (!explicitType && !isHeal && !shieldSlots && (/attack/i.test(entry.tags || '') || /\d+d\d+/i.test(entry.baseDamage || '')));
-  const dmgExpr = isAttack ? (explicitFormula || entry.baseDamage || '1d6') : '';
+  const rawBaseDmgExpr = isAttack ? (explicitFormula || entry.baseDamage || '1d6') : '';
+  const dmgExpr = isAttack ? computeScaledAttackDamageFormula(rawBaseDmgExpr, unlocked) : '';
+  const rankDamageDiceCount = isAttack ? countUnlockedRankDamageDice(entry, unlocked) : 0;
   const armorPiercing = /armor-piercing|ignores dr/i.test(fullText);
-  const isAoe = /area of effect|burst|cone|line|splash|blast radius/i.test(fullText);
+  const aoeSpec = typeof parseAbilityAoeSpec === 'function' ? parseAbilityAoeSpec(entry, unlocked) : { hasAoe: false, shape: null, primaryFt: 0, splashFt: 0 };
+  const isAoe = aoeSpec.hasAoe || /area of effect|burst|cone|line|splash|blast radius/i.test(fullText);
 
   // Buff / Debuff / Light detection (explicit first, fallback to text)
   const detectedBuffs = [];
@@ -1045,8 +1211,11 @@ function analyzeAbilityEffects(caster, kind, entryId, rank) {
     healDice,
     isAttack,
     dmgExpr,
+    rawBaseDmgExpr,
+    rankDamageDiceCount,
     armorPiercing,
     isAoe,
+    aoeSpec,
     rangeFt,
     isSelfOnly,
     ignoreLos,
@@ -1075,12 +1244,34 @@ function toggleEffectRangePreview(sourceTokenId, rangeFt, ignoreLos, label, entr
   if (cur && cur.sourceTokenId === sourceTokenId && cur.label === label) {
     uiState.previewEffectRange = null;
   } else {
+    const sc = getActiveScene();
+    const srcTok = (sc?.tokens || []).find(t => t.id === sourceTokenId);
+    let aoeSpec = null;
+    let targetId = '';
+    if (srcTok && entryId) {
+      const sk = (srcTok.assignedSkills || []).find(a => a.id === entryId);
+      const sp = (srcTok.assignedSpells || []).find(a => a.id === entryId);
+      const kind = sp ? 'spell' : 'skill';
+      const rank = sp ? (sp.rank || 1) : (sk ? (sk.rank || 1) : 1);
+      const info = analyzeAbilityEffects(srcTok, kind, entryId, rank);
+      if (info?.aoeSpec?.hasAoe) aoeSpec = info.aoeSpec;
+      const selEl = document.getElementById(`castTarget_${sourceTokenId}_${kind}_${entryId}`)
+        || document.getElementById(`playerCastTarget_${kind}_${entryId}`)
+        || document.getElementById(`hotlistTarget_${uiState.activeHotlistSlotIdx}`);
+      if (selEl && selEl.value) targetId = selEl.value;
+      if (!targetId && sc) {
+        const valid = getValidAbilityTargetsForCaster(srcTok, info, sc);
+        if (valid.length > 0) targetId = valid[0].id;
+      }
+    }
     uiState.previewEffectRange = {
       sourceTokenId,
       rangeFt: Math.max(0, Number(rangeFt) || 5),
       ignoreLos: Boolean(ignoreLos),
       label,
-      entryId
+      entryId,
+      aoeSpec,
+      targetId
     };
   }
   if (IS_PLAYER_WINDOW) renderPlayerControlDeck();
@@ -1119,7 +1310,7 @@ function getValidAbilityTargetsForCaster(caster, info, scene) {
     const edgeOffsetSq = (span - 1) * 0.5;
     const dx = Math.max(0, Math.abs(caster.gx - t.gx) - edgeOffsetSq);
     const dy = Math.max(0, Math.abs(caster.gy - t.gy) - edgeOffsetSq);
-    if ((dx + dy) * 5 > rangeFt) return false;
+    if (Math.max(dx, dy) * 5 > rangeFt) return false;
 
     if (!info.ignoreLos && blockingWalls.length > 0) {
       const tWx = (t.gx + 0.5) * gs;
@@ -1130,7 +1321,7 @@ function getValidAbilityTargetsForCaster(caster, info, scene) {
   });
 }
 
-function rollDccExpressionForCaster(expr, caster) {
+function rollDccExpressionForCaster(expr, caster, critDoubleDice = false) {
   // Strip parenthetical / trailing area-of-effect or duration clauses (e.g. ", 10ft Blast radius", "(10ft Burst)", "for 2 rounds") before parsing damage
   let str = String(expr || '').trim();
   if (!str) return 0;
@@ -1138,7 +1329,7 @@ function rollDccExpressionForCaster(expr, caster) {
   let total = 0;
   const diceMatches = [...str.matchAll(/(\d+)d(\d+)/gi)];
   diceMatches.forEach(m => {
-    const count = parseInt(m[1], 10);
+    const count = parseInt(m[1], 10) * (critDoubleDice ? 2 : 1);
     const sides = parseInt(m[2], 10);
     for (let i = 0; i < count; i++) total += Math.floor(Math.random() * sides) + 1;
   });
@@ -1165,6 +1356,15 @@ function openAbilityCastPanel(casterId, kind, entryId) {
   const info = analyzeAbilityEffects(caster, kind, entryId, rank);
   if (!info.entry || info.isPurePassive) return;
 
+  if (caster.role === 'crawler' && ((caster.statuses || []).includes('Dying') || getTokenHealthMetrics(caster).curHp <= 0)) {
+    showVttToast(`💀 ${caster.name} is Dying (0 HP) and cannot take actions!`);
+    return;
+  }
+  if (uiState.autoMoveAp && (appState?.round || 0) > 0 && caster.role === 'crawler' && (caster.currentAp ?? 0) <= 0) {
+    showVttToast(`⚠️ ${caster.name} has 0 AP remaining this round!`);
+    return;
+  }
+
   const scene = getActiveScene();
   const validTargets = getValidAbilityTargetsForCaster(caster, info, scene);
   const selEl = document.getElementById(`castTarget_${casterId}_${kind}_${entryId}`);
@@ -1175,12 +1375,12 @@ function openAbilityCastPanel(casterId, kind, entryId) {
     return;
   }
   const targetId = target.id;
+  const rollMode = uiState.combatRollMode || 'normal';
+  const atkCheck = info.isAttack ? rollCrawlerD20AttackCheck(caster, target, info, rollMode) : null;
   let rolledValue = 0;
   if (info.shieldSlots > 0) rolledValue = info.shieldSlots;
   else if (info.isHeal) rolledValue = rollDccExpressionForCaster(info.healDice, caster);
-  else if (info.isAttack) rolledValue = rollDccExpressionForCaster(info.dmgExpr, caster);
-
-  const atkCheck = info.isAttack ? rollCrawlerD20AttackCheck(caster, target, info) : null;
+  else if (info.isAttack) rolledValue = rollDccExpressionForCaster(info.dmgExpr, caster, Boolean(atkCheck?.crit));
 
   uiState.activeCastPanel = {
     casterId,
@@ -1189,6 +1389,7 @@ function openAbilityCastPanel(casterId, kind, entryId) {
     targetId,
     rolledValue,
     atkCheck,
+    rollMode,
     spendMana: info.manaCost > 0,
     applyBuffs: [...info.detectedBuffs],
     applyDebuffs: [...info.detectedDebuffs]
@@ -1225,25 +1426,26 @@ function getFlatNumericDc(rawStr, fallback = 12) {
 function evaluateDccCheckOutcome(naturalRoll, totalRoll, targetDc) {
   const floorNum = Math.max(1, Number(appState?.floor) || 1);
   if (naturalRoll === 1) {
-    return { tier: 'Critical Failure', success: false, crit: false, majorFail: true, dmgMod: floorNum, floorNum };
+    return { tier: 'Critical Fail', success: false, crit: false, amazing: false, nearMiss: false, majorFail: true, critFail: true, dmgMod: 0, floorNum };
   }
   if (naturalRoll === 20) {
-    return { tier: 'Critical Success', success: true, crit: true, majorFail: false, dmgMod: floorNum * 2, floorNum };
+    // Ch. 2 p. 79: Nat 20 doubles base damage dice (no extra Floor mod on top of Crit dice)
+    return { tier: 'Critical Hit', success: true, crit: true, amazing: false, nearMiss: false, majorFail: false, critFail: false, dmgMod: 0, floorNum };
   }
   const diff = totalRoll - targetDc;
   if (diff >= 10) {
-    return { tier: 'Great Success', success: true, crit: false, majorFail: false, dmgMod: floorNum, floorNum };
+    return { tier: 'Amazing Success', success: true, crit: false, amazing: true, nearMiss: false, majorFail: false, critFail: false, dmgMod: floorNum, floorNum };
   }
   if (diff >= 0) {
-    return { tier: 'Standard Success', success: true, crit: false, majorFail: false, dmgMod: 0, floorNum };
+    return { tier: 'Standard Success', success: true, crit: false, amazing: false, nearMiss: false, majorFail: false, critFail: false, dmgMod: 0, floorNum };
   }
   if (diff <= -10) {
-    return { tier: 'Great Failure', success: false, crit: false, majorFail: true, dmgMod: floorNum, floorNum };
+    return { tier: 'Major Fail', success: false, crit: false, amazing: false, nearMiss: false, majorFail: true, critFail: false, dmgMod: floorNum, floorNum };
   }
   if (diff >= -2) {
-    return { tier: 'Near Miss', success: false, crit: false, majorFail: false, dmgMod: 0, floorNum };
+    return { tier: 'Near Miss Fail', success: false, crit: false, amazing: false, nearMiss: true, majorFail: false, critFail: false, dmgMod: 0, floorNum };
   }
-  return { tier: 'Standard Failure', success: false, crit: false, majorFail: false, dmgMod: 0, floorNum };
+  return { tier: 'Standard Fail', success: false, crit: false, amazing: false, nearMiss: false, majorFail: false, critFail: false, dmgMod: 0, floorNum };
 }
 
 function getCrawlerAbilityAttackMod(caster, info) {
@@ -1252,7 +1454,7 @@ function getCrawlerAbilityAttackMod(caster, info) {
   let statKey = ['Str', 'Int', 'Con', 'Dex', 'Cha'].includes(explicitStat) ? explicitStat : 'Str';
   if (!['Str', 'Int', 'Con', 'Dex', 'Cha'].includes(explicitStat)) {
     if (/\bcha\b|charisma/i.test(text)) statKey = 'Cha';
-    else if (/\bdex\b|dexterity|ranged/i.test(text)) statKey = 'Dex';
+    else if (/\bdex\b|dexterity|ranged/i.test(text) || (!info?.entry?.manaCost && (Number(info?.rangeFt) || 5) > 10)) statKey = 'Dex';
     else if (/\bint\b|intelligence/i.test(text) || info?.entry?.manaCost) statKey = 'Int';
     else if (/\bcon\b|constitution/i.test(text)) statKey = 'Con';
   }
@@ -1277,15 +1479,44 @@ function getEffectiveMobEvadeNumeric(entity) {
   return getFlatNumericDc(rawEvade, 12) + statusMod + swarmPenalty;
 }
 
-function rollCrawlerD20AttackCheck(caster, target, info) {
-  const nat = Math.floor(Math.random() * 20) + 1;
+function rollCrawlerD20AttackCheck(caster, target, info, manualMode = 'normal') {
+  const eff = typeof resolveEffectiveAttackRollMode === 'function'
+    ? resolveEffectiveAttackRollMode(caster, target, info, manualMode)
+    : { mode: manualMode, reasons: [] };
+  const d20 = typeof rollD20WithMode === 'function'
+    ? rollD20WithMode(eff.mode)
+    : { nat: Math.floor(Math.random() * 20) + 1, rollText: '', mode: 'normal' };
+  const nat = d20.nat;
+  const rank = Math.max(0, Number(info?.rank) || 0);
   const { statKey, mod } = getCrawlerAbilityAttackMod(caster, info);
-  const total = nat + mod;
+  const total = nat + rank + mod;
   const targetDc = target.role === 'crawler'
     ? 10 + (parseInt(getEffectiveEvadeDisplay(target), 10) || 0)
     : getEffectiveMobEvadeNumeric(target);
   const outcome = evaluateDccCheckOutcome(nat, total, targetDc);
-  return { nat, mod, statKey, total, targetDc, ...outcome };
+  return {
+    nat,
+    rollText: d20.rollText || `d20 (${nat})`,
+    rollMode: eff.mode,
+    modeReasons: eff.reasons,
+    rank,
+    mod,
+    statKey,
+    total,
+    targetDc,
+    ...outcome
+  };
+}
+
+function rollCrawlerD20SkillCheck(caster, info, manualMode = 'normal') {
+  const d20 = typeof rollD20WithMode === 'function'
+    ? rollD20WithMode(manualMode)
+    : { nat: Math.floor(Math.random() * 20) + 1, rollText: '', mode: 'normal' };
+  const nat = d20.nat;
+  const rank = Math.max(0, Number(info?.rank) || 0);
+  const { statKey, mod } = getCrawlerAbilityAttackMod(caster, info);
+  const total = nat + rank + mod;
+  return { nat, rollText: d20.rollText || `d20 (${nat})`, rollMode: d20.mode, rank, mod, statKey, total };
 }
 
 function rollCrawlerEvadeForMobAttack(crawler, flatHitDc) {
@@ -1307,6 +1538,35 @@ function rollCrawlerEvadeForMobAttack(crawler, flatHitDc) {
 }
 
 let lastAnimatedDiceBroadcastId = null;
+let diceBannerAutoFadeTimer = null;
+let diceBannerFadedOutId = null;
+
+function scheduleDiceBannerAutoFade(broadcastId, delayMs = 4500) {
+  if (diceBannerAutoFadeTimer) {
+    clearTimeout(diceBannerAutoFadeTimer);
+    diceBannerAutoFadeTimer = null;
+  }
+  if (!broadcastId) return;
+  diceBannerAutoFadeTimer = setTimeout(() => {
+    const el = document.getElementById('liveDiceRollBanner');
+    if (!el || el.classList.contains('hidden')) return;
+    if (uiState.showRollHistory) return;
+    const activeData = appState?.lastDiceBroadcast;
+    if (!activeData || activeData.id !== broadcastId) return;
+    diceBannerFadedOutId = broadcastId;
+    el.style.transition = 'opacity 0.55s ease, transform 0.55s ease';
+    el.style.opacity = '0';
+    el.style.transform = 'translate(-50%, -10px) scale(0.97)';
+    setTimeout(() => {
+      const checkEl = document.getElementById('liveDiceRollBanner');
+      if (checkEl && !uiState.showRollHistory && appState?.lastDiceBroadcast?.id === broadcastId) {
+        checkEl.classList.add('hidden');
+        checkEl.style.opacity = '';
+        checkEl.style.transform = '';
+      }
+    }, 560);
+  }, delayMs);
+}
 
 function detectDiceFlareLevel(data) {
   if (!data) return 'standard';
@@ -1317,7 +1577,7 @@ function detectDiceFlareLevel(data) {
     ...(data.rolls || []).flatMap(r => [r.resultLabel, r.playerResultLabel, r.formulaText, r.playerFormulaText])
   ].join(' | ');
   if (/critical\s*success|critical\s*hit|nat\s*20/i.test(allText)) return 'crit';
-  if (/great\s*success/i.test(allText)) return 'great';
+  if (/great\s*success|amazing\s*success/i.test(allText)) return 'great';
   return 'standard';
 }
 
@@ -1373,16 +1633,28 @@ function spawnDiceBannerParticles(bannerEl, level) {
 
 function broadcastDiceRollEvent(payload) {
   if (!appState) return;
-  appState.lastDiceBroadcast = {
+  const ev = {
     id: 'roll_' + Date.now(),
     timestamp: Date.now(),
     ...payload
   };
+  appState.lastDiceBroadcast = ev;
+  appState.diceRollHistory = Array.isArray(appState.diceRollHistory) ? appState.diceRollHistory : [];
+  appState.diceRollHistory.unshift(ev);
+  if (appState.diceRollHistory.length > 10) appState.diceRollHistory = appState.diceRollHistory.slice(0, 10);
 }
 
 function dismissLiveDiceBanner() {
+  if (diceBannerAutoFadeTimer) {
+    clearTimeout(diceBannerAutoFadeTimer);
+    diceBannerAutoFadeTimer = null;
+  }
   const el = document.getElementById('liveDiceRollBanner');
-  if (el) el.classList.add('hidden');
+  if (el) {
+    el.classList.add('hidden');
+    el.style.opacity = '';
+    el.style.transform = '';
+  }
   if (appState) {
     appState.lastDiceBroadcast = null;
     commitStateChange();
@@ -1392,12 +1664,24 @@ function dismissLiveDiceBanner() {
 function renderLiveDiceBroadcastBanner() {
   const el = document.getElementById('liveDiceRollBanner');
   if (!el) return;
-  const data = appState?.lastDiceBroadcast;
+  const historyList = Array.isArray(appState?.diceRollHistory) ? appState.diceRollHistory : [];
+  const data = appState?.lastDiceBroadcast || (uiState.showRollHistory ? historyList[0] : null);
   if (!data) {
     el.classList.add('hidden');
+    el.style.opacity = '';
+    el.style.transform = '';
     lastAnimatedDiceBroadcastId = null;
     return;
   }
+
+  if (appState?.lastDiceBroadcast && data.id === diceBannerFadedOutId && !uiState.showRollHistory) {
+    el.classList.add('hidden');
+    return;
+  }
+
+  el.style.transition = '';
+  el.style.opacity = '';
+  el.style.transform = '';
 
   const flare = detectDiceFlareLevel(data);
   const isNewBroadcast = data.id && data.id !== lastAnimatedDiceBroadcastId;
@@ -1413,7 +1697,7 @@ function renderLiveDiceBroadcastBanner() {
   const rowsHtml = (data.rolls || []).map(r => {
     const txtCheck = `${r.resultLabel || ''} ${r.playerResultLabel || ''}`;
     const isRowCrit = /critical\s*success|critical\s*hit/i.test(txtCheck);
-    const isRowGreat = /great\s*success/i.test(txtCheck);
+    const isRowGreat = /great\s*success|amazing\s*success/i.test(txtCheck);
     let badgeCls = r.hit
       ? 'bg-rose-500/25 border-rose-400/50 text-rose-200'
       : 'bg-emerald-500/25 border-emerald-400/50 text-emerald-200';
@@ -1452,14 +1736,36 @@ function renderLiveDiceBroadcastBanner() {
         <div class="font-bold text-sm ${flare === 'crit' ? 'text-yellow-100' : 'text-slate-100'}">${data.title}</div>
         ${subtitleShown ? `<div class="text-[11px] font-mono ${flare === 'crit' ? 'text-amber-200' : flare === 'great' ? 'text-emerald-200' : 'text-cyan-300'}">${subtitleShown}</div>` : ''}
       </div>
-      ${!IS_PLAYER_WINDOW ? `<button onclick="dismissLiveDiceBanner()" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>` : ''}
+      <div class="flex items-center gap-1 shrink-0">
+        ${historyList.length > 1 ? `<button type="button" onclick="toggleDiceRollHistory()" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[10px] font-mono font-bold">📜 ${uiState.showRollHistory ? 'Hide' : `History (${historyList.length})`}</button>` : ''}
+        ${!IS_PLAYER_WINDOW ? `<button onclick="dismissLiveDiceBanner()" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>` : (uiState.showRollHistory && !appState?.lastDiceBroadcast ? `<button onclick="toggleDiceRollHistory()" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold">✕</button>` : '')}
+      </div>
     </div>
     <div class="space-y-1.5 relative z-10">${rowsHtml}</div>
+    ${uiState.showRollHistory && historyList.length > 1 ? `
+      <div class="mt-2 pt-2 border-t border-slate-800/90 space-y-1 max-h-44 overflow-y-auto relative z-10">
+        <div class="text-[9.5px] font-mono uppercase text-cyan-400 font-bold">📜 Recent Rolls (Last ${historyList.length})</div>
+        ${historyList.slice(1).map(h => {
+          const firstRow = (h.rolls || [])[0];
+          const resTxt = firstRow ? (IS_PLAYER_WINDOW && firstRow.playerResultLabel !== undefined ? firstRow.playerResultLabel : firstRow.resultLabel) : '';
+          return `
+            <div class="bg-dungeon-950/80 border border-slate-800/80 rounded-lg px-2 py-1 flex items-center justify-between gap-2 text-[10px]">
+              <span class="font-semibold text-slate-300 truncate">${escapeHtmlAttr(h.title || 'Roll')}</span>
+              <span class="font-mono text-amber-300 shrink-0">${escapeHtmlAttr(resTxt)}</span>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    ` : ''}
   `;
   el.classList.remove('hidden');
 
   if (isNewBroadcast) {
     lastAnimatedDiceBroadcastId = data.id;
+    if (appState?.lastDiceBroadcast?.id === data.id) {
+      diceBannerFadedOutId = null;
+      scheduleDiceBannerAutoFade(data.id, 4500);
+    }
     if (flare !== 'standard') {
       spawnDiceBannerParticles(el, flare);
       playSuccessChime(flare);
@@ -1564,7 +1870,7 @@ function getMobAttackInRangeCrawlers(mob, atk, scene) {
     if (c.id === mob.id || c.role !== 'crawler') return false;
     const dx = Math.max(0, Math.abs(mob.gx - c.gx) - edgeOffsetSq);
     const dy = Math.max(0, Math.abs(mob.gy - c.gy) - edgeOffsetSq);
-    if ((dx + dy) * 5 > rangeFt) return false;
+    if (Math.max(dx, dy) * 5 > rangeFt) return false;
     if (!ignoreLos && blockingWalls.length > 0) {
       const cWx = (c.gx + 0.5) * gs;
       const cWy = (c.gy + 0.5) * gs;
@@ -1589,7 +1895,7 @@ function getMobAttackLosBlockedCrawlers(mob, atk, scene) {
     if (c.id === mob.id || c.role !== 'crawler') return false;
     const dx = Math.max(0, Math.abs(mob.gx - c.gx) - edgeOffsetSq);
     const dy = Math.max(0, Math.abs(mob.gy - c.gy) - edgeOffsetSq);
-    if ((dx + dy) * 5 > rangeFt) return false;
+    if (Math.max(dx, dy) * 5 > rangeFt) return false;
     const cWx = (c.gx + 0.5) * gs;
     const cWy = (c.gy + 0.5) * gs;
     return !hasLineOfSightBetweenPoints(mobWx, mobWy, cWx, cWy, blockingWalls);
@@ -1689,29 +1995,53 @@ function executeSingleClickMobAttack(mobId, atkIdx) {
       return;
     }
 
+    let aoeHalfEvade = false;
+    let evadeNearMiss = false;
+    let pendingInjuryNote = '';
     if (doEvade) {
       const ev = rollCrawlerEvadeForMobAttack(origTarget, flatHitDc);
       evaded = ev.success;
       isCritHit = ev.nat === 1;
       isMajorFail = ev.majorFail;
+      evadeNearMiss = Boolean(ev.nearMiss);
       floorDmgBonus = Number(ev.dmgMod) || 0;
-      rollNote = `Evade d20 (${ev.nat}) ${ev.evadeBonus >= 0 ? `+${ev.evadeBonus}` : ev.evadeBonus} = ${ev.total} vs Flat ${flatHitDc} (${ev.tier})`;
+      rollNote = `Evade d20 (${ev.nat}) ${ev.evadeBonus >= 0 ? `+${ev.evadeBonus}` : ev.evadeBonus} = ${ev.total} vs Flat ${flatHitDc} (${ev.tier})${evadeNearMiss ? ' • ⚠️ NEAR MISS (Ally can Intervene 1d6!)' : ''}`;
 
       if (evaded) {
-        summaryParts.push(`${origTarget.name}: Evaded!`);
-        broadcastRolls.push({
-          targetName: `${origTarget.iconSymbol || '⚔️'} ${origTarget.name}`,
-          formulaText: rollNote,
-          playerFormulaText: `Evade d20 (${ev.nat}) ${ev.evadeBonus >= 0 ? `+${ev.evadeBonus}` : ev.evadeBonus} = ${ev.total}`,
-          resultLabel: `EVADED (${ev.tier})`,
-          playerResultLabel: `EVADED (${ev.tier})`,
-          hit: false
-        });
-        return;
+        let counterAdvNote = '';
+        if (ev.crit || ev.amazing) {
+          origTarget.evadeAdvVsMobId = mob.id;
+          counterAdvNote = ` • ⚡ Adv on next Atk vs ${mob.name}!`;
+        }
+        if (!isAoe) {
+          summaryParts.push(`${origTarget.name}: Evaded!${counterAdvNote}`);
+          broadcastRolls.push({
+            targetName: `${origTarget.iconSymbol || '⚔️'} ${origTarget.name}`,
+            formulaText: rollNote + counterAdvNote,
+            playerFormulaText: `Evade d20 (${ev.nat}) ${ev.evadeBonus >= 0 ? `+${ev.evadeBonus}` : ev.evadeBonus} = ${ev.total}${counterAdvNote}`,
+            resultLabel: `EVADED (${ev.tier})`,
+            playerResultLabel: `EVADED (${ev.tier})`,
+            hit: false
+          });
+          return;
+        } else {
+          // Ch. 2 p. 83: Successful Evade on Area Attack reduces damage by 50%
+          aoeHalfEvade = true;
+          rollNote += ` • AoE Evaded (50% dmg)${counterAdvNote}`;
+        }
+      } else if (ev.critFail) {
+        origTarget.pendingInjuries = origTarget.pendingInjuries || [];
+        origTarget.pendingInjuries.push('Major Injury');
+        pendingInjuryNote = ' • 🩹 Queued Major Injury (Post-Combat)';
+      } else if (ev.majorFail) {
+        origTarget.pendingInjuries = origTarget.pendingInjuries || [];
+        origTarget.pendingInjuries.push('Minor Injury');
+        pendingInjuryNote = ' • 🩹 Queued Minor Injury (Post-Combat)';
       }
     }
 
     let incomingDmg = (isCritHit ? baseDmgRoll * 2 : baseDmgRoll) + floorDmgBonus;
+    if (aoeHalfEvade) incomingDmg = Math.floor(incomingDmg / 2);
     let blockNote = '';
     if (doBlock) {
       const sbRank = getCrawlerSkillRank(origTarget, /^shield\s*block$/i);
@@ -1735,7 +2065,8 @@ function executeSingleClickMobAttack(mobId, atkIdx) {
     if (pipOut.effectiveHpDamage > 0) adjustTokenHealth(origTarget.id, -pipOut.effectiveHpDamage);
 
     const dmgTags = [];
-    if (isCritHit) dmgTags.push('CRIT ×2');
+    if (isCritHit) dmgTags.push('CRIT FAIL ×2');
+    if (aoeHalfEvade) dmgTags.push('AoE ½ Evade');
     if (floorDmgBonus > 0) dmgTags.push(`+${floorDmgBonus} Floor`);
     if (doBlock && /SUCCESS/.test(blockNote)) dmgTags.push('½ Block');
     if (dr > 0) dmgTags.push(`${dr} DR`);
@@ -1766,7 +2097,7 @@ function executeSingleClickMobAttack(mobId, atkIdx) {
       : `HIT • 0 dmg (Not Enough for 1 Pip)`;
     broadcastRolls.push({
       targetName: `${origTarget.iconSymbol || '⚔️'} ${origTarget.name}`,
-      formulaText: rollNote,
+      formulaText: rollNote + pendingInjuryNote,
       playerFormulaText: playerRollNote,
       resultLabel: `HIT • ${dmgSummary}`,
       playerResultLabel: `${playerPipLabel}${dmgTags.length ? ` (${dmgTags.join(', ')})` : ''}${appliedDebs.length ? ` ${appliedDebs.join(' ')}` : ''}`,
@@ -1798,6 +2129,7 @@ function executeSingleClickMobAttack(mobId, atkIdx) {
     brokeInvis = true;
   }
 
+  if (typeof clearDeclaredMobAttack === 'function') clearDeclaredMobAttack(mob.id, atkIdx);
   mob.mobAttacked = true;
   commitStateChange();
   showVttToast(`🗡️ ${mob.name}${brokeInvis ? ' (Revealed!)' : ''} → ${summaryParts.join(' | ')}`);
@@ -1815,24 +2147,46 @@ function executeAbilityCastResolution() {
   const info = analyzeAbilityEffects(caster, panel.kind, panel.entryId, learned?.rank || 1);
   const val = Math.max(0, Number(panel.rolledValue) || 0);
 
+  // Ch. 4: Mark non-passive Skills for Skill Advancement when a Skill Check is made
+  if (learned && !info.isPurePassive && !info.isAuraOrPassive) {
+    learned.markedForAdvancement = true;
+  }
+
+  if (uiState.autoMoveAp && (appState?.round || 0) > 0 && caster.role === 'crawler') {
+    caster.currentAp = Math.max(0, (caster.currentAp ?? 2) - 1);
+  }
   if (panel.spendMana && info.manaCost > 0) {
     caster.currentMana = Math.max(0, (caster.currentMana || 0) - info.manaCost);
   }
 
+  // Consume Evade Counter-Advantage if attacking that Mob
+  if (info.isAttack && caster.evadeAdvVsMobId && caster.evadeAdvVsMobId === target.id) {
+    caster.evadeAdvVsMobId = null;
+  }
+
   const notes = [];
   let attackHit = true;
+  const rollLabelStr = panel.atkCheck?.rollText || `d20 (${panel.atkCheck?.nat})`;
+  const modeTagStr = (panel.atkCheck?.modeReasons && panel.atkCheck.modeReasons.length)
+    ? ` [${panel.atkCheck.modeReasons.join(', ')}]`
+    : '';
   if (info.isAttack && panel.atkCheck) {
     attackHit = panel.atkCheck.success;
     if (!attackHit) {
-      notes.push(`Missed (${panel.atkCheck.tier})`);
+      const coverHits = typeof getCoverObjectsBetweenTokens === 'function' ? getCoverObjectsBetweenTokens(caster, target, scene) : [];
+      const coverMissNote = coverHits.length > 0
+        ? ` • 🧱 Missed attack may hit cover: ${coverHits.map(o => o.name).join(', ')} (check sturdiness / Str)`
+        : '';
+      const nearMissTag = (panel.atkCheck.nearMiss ? ' • ⚠️ NEAR MISS — Ally can Intervene (1d6)!' : '') + coverMissNote;
+      notes.push(`Missed (${panel.atkCheck.tier})${coverMissNote}`);
       broadcastDiceRollEvent({
         title: `${caster.iconSymbol || '⚔️'} ${caster.name} — ${info.entry?.name}`,
-        subtitle: `Attack d20 (${panel.atkCheck.nat}) + ${panel.atkCheck.mod} (${panel.atkCheck.statKey}) = ${panel.atkCheck.total} vs Flat Evade ${panel.atkCheck.targetDc}`,
-        playerSubtitle: `Attack d20 (${panel.atkCheck.nat}) + ${panel.atkCheck.mod} (${panel.atkCheck.statKey}) = ${panel.atkCheck.total}`,
+        subtitle: `Attack ${rollLabelStr} + R${panel.atkCheck.rank ?? info.rank} + ${panel.atkCheck.mod} (${panel.atkCheck.statKey}) = ${panel.atkCheck.total} vs Flat Evade ${panel.atkCheck.targetDc}${modeTagStr}`,
+        playerSubtitle: `Attack ${rollLabelStr} + R${panel.atkCheck.rank ?? info.rank} + ${panel.atkCheck.mod} (${panel.atkCheck.statKey}) = ${panel.atkCheck.total}${modeTagStr}`,
         rolls: [{
           targetName: `${target.iconSymbol || '👹'} ${target.name}`,
-          formulaText: `Rolled ${panel.atkCheck.total} vs Flat Evade ${panel.atkCheck.targetDc}`,
-          playerFormulaText: `Attack Total: ${panel.atkCheck.total}`,
+          formulaText: `Rolled ${panel.atkCheck.total} vs Flat Evade ${panel.atkCheck.targetDc}${nearMissTag}`,
+          playerFormulaText: `Attack Total: ${panel.atkCheck.total}${nearMissTag}`,
           resultLabel: `MISS (${panel.atkCheck.tier})`,
           playerResultLabel: `MISS (${panel.atkCheck.tier})`,
           hit: false
@@ -1847,9 +2201,27 @@ function executeAbilityCastResolution() {
     }
   }
 
+  let aoeBroadcastRows = null;
   if (info.shieldSlots > 0 && val > 0) {
-    target.shieldPips = Math.min(20, (target.shieldPips || 0) + val);
-    notes.push(`+${val} Shield Pips`);
+    const isPartyShield = info.isAoe || /(shell|burst|party|nearby|allies)/i.test(`${info.entry?.name || ''} ${info.entry?.range || ''} ${info.entry?.description || ''}`);
+    if (isPartyShield) {
+      const intRaw = caster?.stats?.Int || '10';
+      const intScore = parseInt(String(intRaw).match(/(\d+)/)?.[1] || '10', 10);
+      const intMod = getDccStatModifierFromScore(intScore);
+      const burstFt = /\+\s*int/i.test(info.entry?.description || '') ? (10 + intMod) : Math.max(5, info.aoeSpec?.primaryFt || info.rangeFt || 10);
+      const shieldedNames = [];
+      (scene.tokens || []).forEach(ally => {
+        if (ally.role !== 'crawler' || getTokenHealthMetrics(ally).curHp <= 0) return;
+        if (calcGridDistanceFt(caster.gx, caster.gy, ally.gx, ally.gy) <= burstFt) {
+          ally.shieldPips = Math.min(20, (ally.shieldPips || 0) + val);
+          shieldedNames.push(ally.name);
+        }
+      });
+      notes.push(`+${val} Shield Pips → ${shieldedNames.join(', ') || target.name}`);
+    } else {
+      target.shieldPips = Math.min(20, (target.shieldPips || 0) + val);
+      notes.push(`+${val} Shield Pips`);
+    }
   } else if (info.isHeal && val > 0) {
     const hm = getTokenHealthMetrics(target);
     const healHp = val * hm.hpPerPip;
@@ -1857,36 +2229,86 @@ function executeAbilityCastResolution() {
     target.currentPips = getTokenHealthMetrics(target).filledPips;
     notes.push(`Healed ${val} Pips (${healHp} HP)`);
   } else if (info.isAttack && val > 0) {
-    const critMult = panel.atkCheck?.crit ? 2 : 1;
+    const isCrit = Boolean(panel.atkCheck?.crit);
     const floorDmgBonus = Number(panel.atkCheck?.dmgMod) || 0;
-    const rolledDmg = (val * critMult) + floorDmgBonus;
-    const dr = info.armorPiercing ? 0 : getEffectiveTokenDr(target);
-    let netDmg = Math.max(0, rolledDmg - dr);
-    const dmgTags = [];
-    if (critMult > 1) dmgTags.push('CRIT ×2');
-    if (floorDmgBonus > 0) dmgTags.push(`+${floorDmgBonus} Floor`);
-    if (dr > 0) dmgTags.push(`${dr} DR blocked`);
+    const rankDieRes = (info.rankDamageDiceCount > 0 && typeof rollDccRankDamageDie === 'function')
+      ? rollDccRankDamageDie(info.rank, info.rankDamageDiceCount)
+      : { total: 0, label: '' };
+    // Ch. 2 p. 79 & Table 37: Base dice were already doubled on Nat 20; Rank dice & Floor bonus added after
+    const fullRolledDmg = val + rankDieRes.total + floorDmgBonus;
+    const zones = (info.aoeSpec?.hasAoe && typeof getTokensInAoeZones === 'function')
+      ? getTokensInAoeZones(caster, target, info.aoeSpec, scene)
+      : { primary: [target], splash: [] };
 
-    const targetHm = getTokenHealthMetrics(target);
-    if (target.role !== 'crawler' && targetHm.swarmCount > 1 && netDmg > 0) {
-      if (info.isAoe) {
-        netDmg = Math.ceil(netDmg * 1.2);
-        dmgTags.unshift('🌊 Swarm AoE +20%');
-      } else {
-        const unitMaxHp = targetHm.baseMaxPips * targetHm.hpPerPip;
-        const currentUnitHp = ((targetHm.curHp - 1) % unitMaxHp) + 1;
-        if (netDmg > currentUnitHp) {
-          netDmg = currentUnitHp;
-          dmgTags.push('1-Hit Unit Cap');
+    const applyHitToVictim = (victim, isSplashZone) => {
+      const zoneBase = isSplashZone ? Math.floor(fullRolledDmg / 2) : fullRolledDmg;
+      const dr = info.armorPiercing ? 0 : getEffectiveTokenDr(victim);
+      let netDmg = Math.max(0, zoneBase - dr);
+      const dmgTags = [];
+      if (isCrit) dmgTags.push('CRIT 2×DICE');
+      if (isSplashZone) dmgTags.push('SPLASH ½');
+      if (rankDieRes.total > 0) dmgTags.push(`+${rankDieRes.total} Rank Die ${rankDieRes.label}`);
+      if (floorDmgBonus > 0) dmgTags.push(`+${floorDmgBonus} Floor`);
+      if (dr > 0) dmgTags.push(`${dr} DR blocked`);
+
+      const targetHm = getTokenHealthMetrics(victim);
+      if (victim.role !== 'crawler' && targetHm.swarmCount > 1 && netDmg > 0) {
+        if (info.isAoe) {
+          netDmg = Math.ceil(netDmg * 1.2);
+          dmgTags.unshift('🌊 Swarm AoE +20%');
+        } else {
+          const unitMaxHp = targetHm.baseMaxPips * targetHm.hpPerPip;
+          const currentUnitHp = ((targetHm.curHp - 1) % unitMaxHp) + 1;
+          if (netDmg > currentUnitHp) {
+            netDmg = currentUnitHp;
+            dmgTags.push('1-Hit Unit Cap');
+          }
         }
       }
-    }
-    const pipOut = calculateWholePipDamageOutcome(target, netDmg);
-    if (pipOut.pipsDestroyed > 0) {
-      adjustTokenHealth(target.id, -pipOut.effectiveHpDamage);
-      notes.push(`${pipOut.effectiveHpDamage} dmg (${pipOut.pipsDestroyed} ${pipOut.pipsDestroyed === 1 ? 'Pip' : 'Pips'}${dmgTags.length ? ` • ${dmgTags.join(', ')}` : ''})`);
+      const pipOut = calculateWholePipDamageOutcome(victim, netDmg);
+      if (pipOut.pipsDestroyed > 0) {
+        adjustTokenHealth(victim.id, -pipOut.effectiveHpDamage);
+        return {
+          gmNote: `${pipOut.effectiveHpDamage} dmg (${pipOut.pipsDestroyed} ${pipOut.pipsDestroyed === 1 ? 'Pip' : 'Pips'}${dmgTags.length ? ` • ${dmgTags.join(', ')}` : ''})`,
+          playerNote: `${pipOut.effectiveHpDamage} dmg (${pipOut.pipsDestroyed} ${pipOut.pipsDestroyed === 1 ? 'Pip' : 'Pips'})${isSplashZone ? ' [Splash ½]' : ''}`
+        };
+      }
+      return {
+        gmNote: `0 dmg (${netDmg} < ${pipOut.hpPerPip} HP/Pip — Not Enough for 1 Pip${dmgTags.length ? ` • ${dmgTags.join(', ')}` : ''})`,
+        playerNote: `0 dmg (Not Enough for 1 Pip)${isSplashZone ? ' [Splash ½]' : ''}`
+      };
+    };
+
+    const totalVictims = zones.primary.length + zones.splash.length;
+    if (info.aoeSpec?.hasAoe && totalVictims > 1) {
+      aoeBroadcastRows = [];
+      zones.primary.forEach(v => {
+        const res = applyHitToVictim(v, false);
+        notes.push(`${v.name}: ${res.gmNote}`);
+        aoeBroadcastRows.push({
+          targetName: `${v.iconSymbol || '👹'} ${v.name} (Primary)`,
+          formulaText: `${panel.atkCheck?.tier || 'HIT'} • Damage Roll: ${fullRolledDmg}`,
+          playerFormulaText: `Primary AoE Zone • Damage Roll: ${fullRolledDmg}`,
+          resultLabel: `HIT • ${res.gmNote}`,
+          playerResultLabel: `HIT • ${res.playerNote}`,
+          hit: true
+        });
+      });
+      zones.splash.forEach(v => {
+        const res = applyHitToVictim(v, true);
+        notes.push(`${v.name} [Splash]: ${res.gmNote}`);
+        aoeBroadcastRows.push({
+          targetName: `${v.iconSymbol || '👹'} ${v.name} (Splash ½)`,
+          formulaText: `Splash Zone (50% dmg: ${Math.floor(fullRolledDmg / 2)})`,
+          playerFormulaText: `Splash Zone (50% dmg: ${Math.floor(fullRolledDmg / 2)})`,
+          resultLabel: `SPLASH • ${res.gmNote}`,
+          playerResultLabel: `SPLASH • ${res.playerNote}`,
+          hit: true
+        });
+      });
     } else {
-      notes.push(`0 dmg (${netDmg} < ${pipOut.hpPerPip} HP/Pip — Not Enough for 1 Pip${dmgTags.length ? ` • ${dmgTags.join(', ')}` : ''})`);
+      const res = applyHitToVictim(target, false);
+      notes.push(res.gmNote);
     }
   }
 
@@ -1916,12 +2338,12 @@ function executeAbilityCastResolution() {
     }).filter(n => !/\bDR\b|slain/i.test(n));
     broadcastDiceRollEvent({
       title: `${caster.iconSymbol || '⚔️'} ${caster.name} — ${info.entry?.name}`,
-      subtitle: `Attack d20 (${panel.atkCheck.nat}) + ${panel.atkCheck.mod} (${panel.atkCheck.statKey}) = ${panel.atkCheck.total} vs Flat Evade ${panel.atkCheck.targetDc}`,
-      playerSubtitle: `Attack d20 (${panel.atkCheck.nat}) + ${panel.atkCheck.mod} (${panel.atkCheck.statKey}) = ${panel.atkCheck.total}`,
-      rolls: [{
+      subtitle: `Attack ${rollLabelStr} + R${panel.atkCheck.rank ?? info.rank} + ${panel.atkCheck.mod} (${panel.atkCheck.statKey}) = ${panel.atkCheck.total} vs Flat Evade ${panel.atkCheck.targetDc}${modeTagStr}`,
+      playerSubtitle: `Attack ${rollLabelStr} + R${panel.atkCheck.rank ?? info.rank} + ${panel.atkCheck.mod} (${panel.atkCheck.statKey}) = ${panel.atkCheck.total}${modeTagStr}`,
+      rolls: aoeBroadcastRows || [{
         targetName: `${target.iconSymbol || '👹'} ${target.name}`,
-        formulaText: `${panel.atkCheck.tier} • Damage Roll: ${val}${panel.atkCheck.crit ? ' ×2' : ''}${fBonus > 0 ? ` + ${fBonus} Floor` : ''}`,
-        playerFormulaText: `Damage Roll: ${val}${panel.atkCheck.crit ? ' ×2' : ''}${fBonus > 0 ? ` + ${fBonus} Floor` : ''}`,
+        formulaText: `${panel.atkCheck.tier} • Damage Roll: ${val}${panel.atkCheck.crit ? ' (2× Base Dice)' : ''}${fBonus > 0 ? ` + ${fBonus} Floor` : ''}`,
+        playerFormulaText: `Damage Roll: ${val}${panel.atkCheck.crit ? ' (2× Base Dice)' : ''}${fBonus > 0 ? ` + ${fBonus} Floor` : ''}`,
         resultLabel: `HIT • ${notes.join(', ')}`,
         playerResultLabel: `${panel.atkCheck.tier.toUpperCase()}${playerNotes.length ? ` • ${playerNotes.join(', ')}` : ''}`,
         hit: true
@@ -1930,16 +2352,29 @@ function executeAbilityCastResolution() {
   }
 
   if (!info.isAttack) {
+    const needsSkillCheck = panel.kind === 'skill' && !info.isPurePassive && !info.isAuraOrPassive;
+    const skChk = needsSkillCheck ? rollCrawlerD20SkillCheck(caster, info) : null;
+    const checkFormula = skChk
+      ? `Skill Check: d20 (${skChk.nat}) + R${skChk.rank} + ${skChk.mod} (${skChk.statKey}) = ${skChk.total}${notes.length ? ` • ${notes.join(' • ')}` : ''}`
+      : (notes.length ? notes.join(' • ') : `Used ${info.entry?.name}`);
+    const resBadge = skChk
+      ? `CHECK: ${skChk.total}`
+      : (info.shieldSlots > 0 ? 'SHIELDED' : info.isHeal ? 'HEALED' : 'APPLIED');
     broadcastDiceRollEvent({
-      title: `${caster.iconSymbol || '⚔️'} ${caster.name} — ${info.entry?.name}`,
-      subtitle: `${info.manaCost > 0 ? `Mana Spent: ${info.manaCost} MP` : 'Ability Activated'}`,
-      playerSubtitle: `${info.manaCost > 0 ? `Mana Spent: ${info.manaCost} MP` : 'Ability Activated'}`,
+      title: `${caster.iconSymbol || '⚔️'} ${caster.name} — ${info.entry?.name} (R${info.rank})`,
+      subtitle: skChk
+        ? `Skill Check (d20 + Rank + ${skChk.statKey} Mod)${skChk.nat === 20 ? ' • NAT 20!' : skChk.nat === 1 ? ' • NAT 1!' : ''}`
+        : `${info.manaCost > 0 ? `Mana Spent: ${info.manaCost} MP` : 'Ability Activated'}`,
+      playerSubtitle: skChk
+        ? `Skill Check (d20 + Rank + ${skChk.statKey} Mod)${skChk.nat === 20 ? ' • NAT 20!' : skChk.nat === 1 ? ' • NAT 1!' : ''}`
+        : `${info.manaCost > 0 ? `Mana Spent: ${info.manaCost} MP` : 'Ability Activated'}`,
+      flareLevel: skChk && skChk.nat === 20 ? 'crit' : 'standard',
       rolls: [{
         targetName: `${target.iconSymbol || '⚔️'} ${target.name}`,
-        formulaText: notes.length ? notes.join(' • ') : `Used ${info.entry?.name}`,
-        playerFormulaText: notes.length ? notes.join(' • ') : `Used ${info.entry?.name}`,
-        resultLabel: info.shieldSlots > 0 ? 'SHIELDED' : info.isHeal ? 'HEALED' : 'APPLIED',
-        playerResultLabel: info.shieldSlots > 0 ? 'SHIELDED' : info.isHeal ? 'HEALED' : 'APPLIED',
+        formulaText: checkFormula,
+        playerFormulaText: checkFormula,
+        resultLabel: resBadge,
+        playerResultLabel: resBadge,
         hit: false
       }]
     });
@@ -1971,6 +2406,10 @@ function executeAbilityCastResolution() {
 
   const vfxCfg = inferVfxFromAbility(info.entry, info);
   triggerVfxEvent(caster, target, vfxCfg.vfxType, vfxCfg.vfxColor, true);
+  if (typeof spawnPersistentSpellEffect === 'function') {
+    const pe = spawnPersistentSpellEffect(caster, target, info, scene);
+    if (pe) notes.push(`⏳ Persistent (${pe.remainingRounds}r)`);
+  }
 
   uiState.activeCastPanel = null;
   commitStateChange();
@@ -2046,7 +2485,7 @@ function renderCrawlerAssignedAbilitiesHtml(tok) {
           </div>
           <div class="flex items-center gap-1 shrink-0 font-mono text-[10px]">
             <button onclick="adjustCrawlerAbilityRank('${tok.id}', '${kind}', '${item.id}', -1)" class="px-1.5 py-0.2 rounded bg-slate-800 hover:bg-slate-700 font-bold">-</button>
-            <span class="text-amber-300 font-bold px-0.5">R${item.rank || 1}</span>
+            ${kind === 'skill' ? `<button type="button" onclick="toggleSkillAdvancementMark('${tok.id}', '${item.id}')" title="Click to toggle Skill Advancement Mark (★)" class="px-1 py-0.2 rounded font-bold ${item.markedForAdvancement ? 'bg-amber-500/25 text-amber-200 border border-amber-400/50' : 'text-amber-300 hover:bg-slate-800'}">R${item.rank || 1}${item.markedForAdvancement ? '★' : ''}</button>` : `<span class="text-amber-300 font-bold px-0.5">R${item.rank || 1}</span>`}
             <button onclick="adjustCrawlerAbilityRank('${tok.id}', '${kind}', '${item.id}', 1)" class="px-1.5 py-0.2 rounded bg-slate-800 hover:bg-slate-700 font-bold">+</button>
             <button onclick="removeAbilityFromCrawler('${tok.id}', '${kind}', '${item.id}')" class="ml-1 text-rose-400 hover:text-rose-300 font-bold">✕</button>
           </div>
@@ -2124,6 +2563,32 @@ function renderGmInspector() {
     ? (scene.tokens || []).find(t => t.id === uiState.selectedTokenId)
     : null;
 
+  const pEffects = Array.isArray(scene?.persistentEffects) ? scene.persistentEffects : [];
+  const persistentEffectsBoxHtml = pEffects.length > 0 ? `
+    <div class="bg-dungeon-950 border border-amber-500/40 rounded-xl p-2.5 space-y-1.5 text-xs">
+      <div class="flex items-center justify-between gap-2">
+        <span class="font-mono font-bold uppercase text-[10px] text-amber-300">⏳ Active Persistent Spells (${pEffects.length})</span>
+        <button type="button" onclick="clearAllPersistentSpellEffects()" class="px-1.5 py-0.5 rounded bg-rose-950/70 hover:bg-rose-900 text-rose-300 text-[9.5px] font-bold">🧹 Clear All</button>
+      </div>
+      <div class="space-y-1">
+        ${pEffects.map(pe => `
+          <div class="bg-dungeon-900 border border-slate-800 rounded-lg px-2 py-1 flex items-center justify-between gap-1.5 text-[10px]">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background:${pe.vfxColor || '#f97316'}"></span>
+              <span class="font-bold text-slate-100 truncate">${escapeHtmlAttr(pe.name)}</span>
+              <span class="font-mono text-amber-300 shrink-0">${pe.remainingRounds < 0 ? '∞' : `${pe.remainingRounds}r`}</span>
+            </div>
+            <div class="flex items-center gap-1 shrink-0 font-mono">
+              <button type="button" onclick="adjustPersistentEffectRounds('${pe.id}', -1)" class="px-1 rounded bg-slate-800 hover:bg-slate-700">-</button>
+              <button type="button" onclick="adjustPersistentEffectRounds('${pe.id}', 1)" class="px-1 rounded bg-slate-800 hover:bg-slate-700">+</button>
+              <button type="button" onclick="removePersistentSpellEffect('${pe.id}')" title="Dismiss Effect" class="text-rose-400 hover:text-rose-300 font-bold pl-0.5">✕</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  ` : '';
+
   if (!tok) {
     panel.innerHTML = `
       <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-4 text-center space-y-1.5">
@@ -2131,6 +2596,7 @@ function renderGmInspector() {
         <div class="font-bold text-xs text-slate-200">No Token Selected</div>
         <p class="text-[11px] text-slate-400">Click any Crawler or Mob token on the battle map or bottom HUD bar to inspect stats, adjust HP/Mana/AP, merge swarms, or resolve abilities.</p>
       </div>
+      ${persistentEffectsBoxHtml}
     `;
     return;
   }
@@ -2145,18 +2611,35 @@ function renderGmInspector() {
     ? findAdjacentSameTypeMobs(tok)
     : [];
 
+  const resolvedPortraitImg = typeof getResolvedTokenPortraitImage === 'function' ? getResolvedTokenPortraitImage(tok) : null;
+  const inspectorPortraitSrc = tok.portraitDataUrl || tok.portraitUrl || (resolvedPortraitImg && resolvedPortraitImg.src) || '';
+  const inspectorBorderCol = tok.color || (tok.role === 'crawler' ? '#38bdf8' : '#ef4444');
+
   panel.innerHTML = `
     <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-3 space-y-2.5 text-xs">
       <div class="flex items-center justify-between gap-2 border-b border-slate-800 pb-2">
-        <div class="min-w-0">
-          <div class="font-bold text-sm text-slate-100 truncate">${tok.iconSymbol || '⚔️'} ${tok.name} <span class="text-xs font-mono text-amber-400">Lvl ${tok.level || 1}</span></div>
-          <div class="text-[10px] text-slate-400 truncate">${tok.classification || ''}</div>
+        <div class="flex items-center gap-2.5 min-w-0">
+          <div class="w-12 h-12 rounded-xl bg-dungeon-900 border-2 flex items-center justify-center overflow-hidden shrink-0 shadow-md" style="border-color:${escapeHtmlAttr(inspectorBorderCol)}">
+            ${inspectorPortraitSrc
+              ? `<img src="${escapeHtmlAttr(inspectorPortraitSrc)}" alt="${escapeHtmlAttr(tok.name || 'Unit')}" class="w-full h-full object-cover" />`
+              : `<span class="text-2xl">${tok.iconSymbol || (tok.role === 'crawler' ? '⚔️' : '👹')}</span>`
+            }
+          </div>
+          <div class="min-w-0">
+            <div class="font-bold text-sm text-slate-100 truncate">${tok.name} <span class="text-xs font-mono text-amber-400">Lvl ${tok.level || 1}</span></div>
+            <div class="text-[10px] text-slate-400 truncate">${tok.classification || ''}</div>
+          </div>
         </div>
         <div class="flex items-center gap-1 shrink-0">
           <button onclick="setTokenTurnAnchor('${tok.id}')" title="Set Turn Start Anchor" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-bold text-cyan-300">📍</button>
           <button onclick="mulliganTokenTurn('${tok.id}')" title="Undo Turn / Mulligan" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-bold text-amber-300">↩️</button>
           ${tok.role !== 'crawler' ? `<button onclick="toggleTokenVisibility('${tok.id}')" title="Toggle Player Visibility" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-bold ${tok.hiddenFromPlayers ? 'text-purple-300' : 'text-emerald-300'}">${tok.hiddenFromPlayers ? '👻' : '👁️'}</button>` : ''}
+          ${tok.role !== 'crawler' ? `<button onclick="toggleTokenDetectedOnMinimap('${tok.id}')" title="Ping / Clear Red Dot on Player Minimap when out of LOS (Perception/Listening)" class="px-2 py-1 rounded text-[10px] font-bold transition ${tok.detectedOnMinimap ? 'bg-rose-500/30 border border-rose-400 text-rose-200' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}">🔴</button>` : ''}
           <button onclick="removeTokenFromMap('${tok.id}')" title="Remove from Map" class="px-2 py-1 rounded bg-rose-950/80 hover:bg-rose-900 text-rose-300 text-[10px] font-bold">🗑️</button>
+          <label title="Upload / Swap Token Portrait (PNG, JPG, WEBP, JFIF)" class="cursor-pointer px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[10px] font-bold">
+            🖼️
+            <input type="file" accept="image/*,.jfif" onchange="uploadTokenPortraitImage('${tok.id}', event, false)" class="hidden" />
+          </label>
         </div>
       </div>
 
@@ -2228,6 +2711,14 @@ function renderGmInspector() {
             }).join('')}
           </div>
         </div>
+        <div class="flex items-center justify-between pt-1 border-t border-slate-800/80">
+          <span class="text-cyan-300 font-bold">⛰️ Elevation (5ft): <span class="text-amber-300">${typeof formatElevationBadge === 'function' ? (formatElevationBadge(getTokenElevationFt(tok, scene)) || '0ft') : '0ft'}</span></span>
+          <div class="flex items-center gap-1">
+            <button onclick="adjustTokenElevationFt('${tok.id}', -5)" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 font-bold">-5ft</button>
+            <button onclick="setTokenElevationFt('${tok.id}', 0)" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold">0ft</button>
+            <button onclick="adjustTokenElevationFt('${tok.id}', 5)" class="px-1.5 py-0.5 rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-200 font-bold">+5ft</button>
+          </div>
+        </div>
         ${tok.role !== 'crawler' && getSwarmPerSquareCapacity(tok.classification) > 0 ? `
           <div class="flex items-center justify-between pt-1 border-t border-slate-800/80">
             <span class="text-rose-300 font-bold">👥 Swarm: ×${hm.swarmCount} <span class="text-slate-400 font-normal">(${hm.aliveUnits} alive • +${hm.aliveUnits} Hit)</span></span>
@@ -2258,7 +2749,7 @@ function renderGmInspector() {
         </div>
         <div class="flex flex-wrap gap-1">
           ${buffs.length === 0 ? '<span class="text-[10px] text-slate-500 italic">None</span>' : buffs.map(b => {
-            const isPassive = String(b).startsWith('[Passive] ');
+            const isPassive = String(b).startsWith('[Passive] ') || String(b).startsWith('[Aura] ');
             const enc = encodeURIComponent(String(b));
             return `<span onmouseenter="showEffectHoverInfo('buff', '${enc}')" onmouseleave="hideEffectHoverInfo()" class="cursor-help inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-200 transition">${b}${isPassive ? '' : `<button onclick="hideEffectHoverInfo(); removeBuffFromToken('${tok.id}', '${String(b).replace(/'/g, "\\'")}')" class="hover:text-white font-bold">×</button>`}</span>`;
           }).join('')}
@@ -2281,14 +2772,111 @@ function renderGmInspector() {
 
       ${tok.role === 'crawler' ? `
         <div class="bg-dungeon-900 border border-slate-800 rounded-lg p-2 space-y-1.5">
+          ${(appState?.round || 0) === 0 && isExplorationModeActive() ? (() => {
+            const expMobs = ((typeof getActiveScene === 'function' ? getActiveScene() : null)?.tokens || [])
+              .filter(m => m.role !== 'crawler' && !m.hiddenFromPlayers && getTokenHealthMetrics(m).curHp > 0);
+            const mobSelectHtml = expMobs.length > 0 ? `
+              <div class="flex items-center gap-1 text-[9px] font-mono">
+                <span class="text-slate-400 shrink-0">🎯 Mob:</span>
+                <select id="${IS_PLAYER_WINDOW ? 'playerExploreTargetMob' : `exploreTargetMob_${tok.id}`}" class="flex-1 min-w-0 bg-dungeon-950 border border-cyan-500/35 rounded px-1.5 py-0.5 text-cyan-100 text-[9px]">
+                  <option value="">Nearest in Sight (Auto)</option>
+                  ${expMobs.map(m => `<option value="${m.id}">${m.iconSymbol || '👹'} ${escapeHtmlAttr(m.name)} (Lvl ${m.level || 1})</option>`).join('')}
+                </select>
+              </div>
+            ` : '';
+            return `
+            <div class="bg-cyan-950/35 border border-cyan-500/40 rounded-lg p-1.5 space-y-1.5">
+              <div class="flex items-center justify-between gap-1">
+                <span class="text-[9px] font-mono uppercase font-bold text-cyan-300">🧭 Explore &amp; RP</span>
+                <span class="text-[8.5px] font-mono text-slate-400">Shared Banner</span>
+              </div>
+              ${mobSelectHtml}
+              <div class="flex items-center gap-1">
+                <select id="exploreActionSelect_${tok.id}" class="flex-1 min-w-0 bg-dungeon-950 border border-cyan-500/35 rounded px-1.5 py-1 text-[9.5px] font-semibold text-slate-100">
+                  <option value="exp:search">🔍 Search Area</option>
+                  <option value="exp:interact">🤲 Interact / Door</option>
+                  <option value="exp:sneak">🥷 Sneak Approach</option>
+                  <option value="exp:first_impression">🤝 Good First Impression</option>
+                  <option value="exp:animal_handling">🐾 Animal Handling</option>
+                  <option value="exp:parley">💬 Parley (Social)</option>
+                  <option value="exp:pickpocket">🤏 Sleight / Pickpocket</option>
+                  <option value="exp:lore">📜 Lore Check</option>
+                  <option value="trap:detect">🕵️ Detect Traps</option>
+                  <option value="trap:disarm">🔧 Disarm Trap</option>
+                </select>
+                <select id="${IS_PLAYER_WINDOW ? 'playerParleySkillChoice' : `parleySkillChoice_${tok.id}`}" title="Social skill for Parley" class="bg-dungeon-950 border border-sky-500/30 rounded px-1 py-1 text-[8.5px] text-sky-100 max-w-[62px]">
+                  <option value="">Best</option>
+                  <option value="Persuasion">Persuade</option>
+                  <option value="Negotiation">Haggle</option>
+                  <option value="Diplomacy">Diplomacy</option>
+                  <option value="Deception">Deceive</option>
+                  <option value="Intimidate">Intimidate</option>
+                </select>
+                <button type="button" onclick="(function(){ const v = document.getElementById('exploreActionSelect_${tok.id}')?.value || 'exp:search'; if (v.startsWith('trap:')) triggerTrapAction('${tok.id}', v.replace('trap:','')); else triggerCrawlerExplorationAction('${tok.id}', v.replace('exp:','')); })()" class="px-2.5 py-1 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-extrabold text-[9.5px] shrink-0 transition">Go</button>
+              </div>
+            </div>
+            `;
+          })() : ''}
+          <div class="flex items-center justify-between gap-1 text-[10px] font-mono">
+            <span class="text-slate-400 font-bold">🎲 Roll Mode:</span>
+            <div class="flex items-center gap-1">
+              <button type="button" onclick="setCombatRollMode('adv')" class="px-1.5 py-0.5 rounded font-bold ${uiState.combatRollMode === 'adv' ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-300'}">🟢 Adv</button>
+              <button type="button" onclick="setCombatRollMode('normal')" class="px-1.5 py-0.5 rounded font-bold ${uiState.combatRollMode === 'normal' ? 'bg-slate-200 text-slate-950' : 'bg-slate-800 text-slate-300'}">Norm</button>
+              <button type="button" onclick="setCombatRollMode('disadv')" class="px-1.5 py-0.5 rounded font-bold ${uiState.combatRollMode === 'disadv' ? 'bg-rose-500 text-slate-950' : 'bg-slate-800 text-slate-300'}">🔴 Dis</button>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-1.5 pt-0.5">
+            <button type="button" onclick="triggerCrawlerSupportAction('${tok.id}', 'intervene')" class="py-1 px-2 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-500/40 text-cyan-200 font-bold text-[10px] transition">🤝 Intervene (1d6)</button>
+            <button type="button" onclick="triggerCrawlerSupportAction('${tok.id}', 'call_play')" class="py-1 px-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/35 border border-amber-500/40 text-amber-200 font-bold text-[10px] transition">📣 Call a Play (2d6)</button>
+          </div>
+          ${tok.role === 'crawler' ? (() => {
+            const adj = typeof getAdjacentDoorsForToken === 'function' ? getAdjacentDoorsForToken(tok, getActiveScene()) : [];
+            const nextState = adj[0]?.open ? 'Close Door' : 'Open Door';
+            return `<button type="button" ${adj.length === 0 ? 'disabled' : ''} onclick="triggerCrawlerDoorAction('${tok.id}')" class="w-full py-1 px-2 rounded-lg font-bold text-[10px] transition ${adj.length === 0 ? 'bg-slate-800/70 border border-slate-700/70 text-slate-500 cursor-not-allowed' : 'bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-500/40 text-emerald-200'}">🚪 ${nextState} (1 Action${adj.length === 0 ? ' • Move Adjacent' : ''})</button>`;
+          })() : ''}
+          ${tok.evadeAdvVsMobId ? `<div class="text-[9.5px] font-mono text-emerald-300 bg-emerald-950/35 border border-emerald-500/40 rounded px-2 py-0.5">⚡ Counter-Advantage active on next Attack!</div>` : ''}
+          ${(tok.pendingInjuries || []).length > 0 ? `<div class="text-[9.5px] font-mono text-rose-300 bg-rose-950/35 border border-rose-500/40 rounded px-2 py-0.5">🩹 Post-Combat Queued: ${tok.pendingInjuries.join(', ')}</div>` : ''}
+        </div>
+        <div class="bg-dungeon-900 border border-slate-800 rounded-lg p-2 space-y-1.5">
           <div class="flex items-center justify-between">
             <span class="text-[10px] font-mono font-bold uppercase text-amber-400">📚 Learned Skills & Spells</span>
-            <div class="flex gap-2">
+            <div class="flex items-center gap-1.5">
+              <button type="button" onclick="openGmAdvancementModal('${tok.id}')" class="px-1.5 py-0.2 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/40 text-cyan-200 text-[9.5px] font-bold">📈 Advance</button>
               <button onclick="setGmTab('skills')" class="text-[10px] text-amber-300 hover:underline font-semibold">+ Skills Tab</button>
               <button onclick="setGmTab('spells')" class="text-[10px] text-cyan-300 hover:underline font-semibold">+ Spells Tab</button>
             </div>
           </div>
           ${renderCrawlerAssignedAbilitiesHtml(tok)}
+        </div>
+        <div class="bg-dungeon-900 border border-slate-800 rounded-lg p-2 space-y-1.5">
+          <div class="flex items-center justify-between gap-1">
+            <span class="text-[10px] font-mono font-bold uppercase text-emerald-400">🎒 Inventory (${(tok.inventory || []).length})</span><button type="button" onclick="openCraftingModal('${tok.id}')" class="px-1.5 py-0.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/50 text-cyan-200 font-bold text-[9.5px] transition">🛠️ Craft</button>
+            <button type="button" onclick="openGmLootBoxModal('${tok.id}')" class="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/35 border border-amber-400/50 text-amber-200 font-bold text-[10px] transition">🎁 Award Loot Box</button>
+          </div>
+          <div class="flex items-center justify-between bg-dungeon-950 border border-amber-500/30 rounded px-2 py-1 font-mono text-[10px]">
+            <span class="text-amber-300 font-bold">🪙 Gold: ${(Number(tok.gold) || 0).toLocaleString()}g</span>
+            <div class="flex items-center gap-1">
+              <button type="button" onclick="adjustCrawlerGold('${tok.id}', -10)" class="px-1.5 py-0.2 rounded bg-slate-800 hover:bg-slate-700">-10</button>
+              <button type="button" onclick="adjustCrawlerGold('${tok.id}', 10)" class="px-1.5 py-0.2 rounded bg-slate-800 hover:bg-slate-700">+10</button>
+              <button type="button" onclick="adjustCrawlerGold('${tok.id}', 100)" class="px-1.5 py-0.2 rounded bg-amber-900/60 hover:bg-amber-800 text-amber-200">+100</button>
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-1">
+            ${DCC_QUICK_ITEMS_LIBRARY.slice(0, 4).map((it, idx) => `<button type="button" onclick="gmQuickGiveItemToCrawler('${tok.id}', ${idx})" class="px-1.5 py-0.5 rounded bg-dungeon-950 hover:bg-slate-800 border border-slate-700 text-[9.5px] text-slate-200">+ ${it.icon} ${it.name}</button>`).join('')}
+          </div>
+          ${(tok.inventory || []).length === 0
+            ? '<div class="text-[10px] text-slate-500 italic">No items in inventory yet.</div>'
+            : `<div class="space-y-1">${(tok.inventory || []).map(it => `
+                <div class="bg-dungeon-950 border border-slate-800 rounded px-2 py-1 flex items-center justify-between text-[10px]">
+                  <span class="truncate text-slate-200">${it.icon || '🎒'} <b>${escapeHtmlAttr(it.name)}</b> <span class="font-mono text-emerald-300">×${it.qty || 1}</span></span>
+                  <div class="flex items-center gap-1 shrink-0 font-mono">
+                    <button type="button" onclick="adjustCrawlerInventoryQty('${tok.id}', '${it.id}', -1)" class="px-1 rounded bg-slate-800 hover:bg-slate-700">-</button>
+                    <button type="button" onclick="adjustCrawlerInventoryQty('${tok.id}', '${it.id}', 1)" class="px-1 rounded bg-slate-800 hover:bg-slate-700">+</button>
+                    <button type="button" onclick="removeCrawlerInventoryItem('${tok.id}', '${it.id}')" class="text-rose-400 hover:text-rose-300 font-bold">✕</button>
+                  </div>
+                </div>
+              `).join('')}</div>`
+          }
         </div>
       ` : ''}
 
@@ -2327,11 +2915,19 @@ function renderGmInspector() {
                       ${condDebuffs.map(cd => `<span class="px-1.5 py-0.2 rounded bg-rose-500/15 border border-rose-500/35 text-rose-300 font-mono text-[9px]">Auto-Debuff: <b>${cd.name}</b> (${cd.triggerMode === 'majorFail' ? 'on Evade Major Fail+' : cd.triggerMode === 'anyFail' ? 'on Failed Evade' : 'on Hit'})</span>`).join('')}
                     </div>
                   </div>
-                  ${tok.role !== 'crawler' ? `
-                    <button onclick="executeSingleClickMobAttack('${tok.id}', ${atkIdx})" ${inRangeCrawlers.length === 0 ? 'disabled' : ''} class="px-2.5 py-1.5 rounded-lg bg-rose-500 hover:bg-rose-400 text-slate-950 font-extrabold text-[10px] shrink-0 shadow disabled:opacity-40 transition">
-                      ⚔️ Execute Attack
-                    </button>
-                  ` : ''}
+                  ${tok.role !== 'crawler' ? (() => {
+                    const isDeclared = (scene.declaredMobAttacks || []).some(d => d.id === `${tok.id}_${atkIdx}`);
+                    return `
+                      <div class="flex flex-col gap-1 shrink-0">
+                        <button type="button" onclick="toggleDeclareMobAttack('${tok.id}', ${atkIdx})" ${inRangeCrawlers.length === 0 && !isDeclared ? 'disabled' : ''} class="px-2 py-1 rounded-lg font-extrabold text-[10px] shadow disabled:opacity-40 transition ${isDeclared ? 'bg-amber-400 hover:bg-amber-300 text-slate-950' : 'bg-amber-500/20 hover:bg-amber-500/35 border border-amber-400/50 text-amber-200'}">
+                          ${isDeclared ? '🎯 Declared ✓' : '🎯 Declare Target'}
+                        </button>
+                        <button onclick="executeSingleClickMobAttack('${tok.id}', ${atkIdx})" ${inRangeCrawlers.length === 0 ? 'disabled' : ''} class="px-2 py-1 rounded-lg bg-rose-500 hover:bg-rose-400 text-slate-950 font-extrabold text-[10px] shadow disabled:opacity-40 transition">
+                          ⚔️ Execute
+                        </button>
+                      </div>
+                    `;
+                  })() : ''}
                 </div>
                 ${tok.role !== 'crawler' ? (inRangeCrawlers.length === 0 ? `
                   <div class="text-[10px] font-mono text-slate-500 italic">
@@ -2350,7 +2946,7 @@ function renderGmInspector() {
                     ${inRangeCrawlers.map((c, cIdx) => {
                       const dx = Math.max(0, Math.abs(tok.gx - c.gx) - edgeOffsetSq);
                       const dy = Math.max(0, Math.abs(tok.gy - c.gy) - edgeOffsetSq);
-                      const distFt = Math.round((dx + dy) * 5);
+                      const distFt = Math.round(Math.max(dx, dy) * 5);
                       const defaultChecked = a.isSwarmMultiTarget || cIdx === 0;
                       const canBlock = canCrawlerShieldBlockAttack(c, a);
                       const catchers = findEligibleCatchersForTarget(c, allCrawlers, isAoe);
@@ -2362,10 +2958,17 @@ function renderGmInspector() {
                               <span>${c.iconSymbol || '⚔️'} ${c.name} <span class="text-slate-400 font-mono font-normal">(${distFt}ft)</span></span>
                             </label>
                             <div class="flex items-center gap-2 font-mono text-[10px]">
-                              <label class="flex items-center gap-1 text-cyan-300 cursor-pointer" title="Roll d20 + Evade (${getEffectiveEvadeDisplay(c)}) vs Flat ${flatHitDc}">
-                                <input id="mobAtkEvadeChk_${tok.id}_${atkIdx}_${c.id}" type="checkbox" checked class="accent-cyan-400" />
-                                <span>Evade (${getEffectiveEvadeDisplay(c)})</span>
-                              </label>
+                              ${(() => {
+                                const playerEvaded = (appState?.round || 0) > 0 && c.evadeDeclaredRound === appState.round;
+                                const anyDeclared = (scene.declaredMobAttacks || []).some(d => d.id === `${tok.id}_${atkIdx}`);
+                                const chkDefault = playerEvaded || !anyDeclared;
+                                return `
+                                  <label class="flex items-center gap-1 cursor-pointer ${playerEvaded ? 'text-emerald-300 font-bold' : 'text-cyan-300'}" title="Roll d20 + Evade (${getEffectiveEvadeDisplay(c)}) vs Flat ${flatHitDc}">
+                                    <input id="mobAtkEvadeChk_${tok.id}_${atkIdx}_${c.id}" type="checkbox" ${chkDefault ? 'checked' : ''} class="accent-cyan-400" />
+                                    <span>${playerEvaded ? '🛡️ EVADING' : 'Evade'} (${getEffectiveEvadeDisplay(c)})</span>
+                                  </label>
+                                `;
+                              })()}
                               ${canBlock ? `
                                 <label class="flex items-center gap-1 text-amber-300 cursor-pointer" title="Roll Shield Block (1d20 + Str) for half damage">
                                   <input id="mobAtkBlockChk_${tok.id}_${atkIdx}_${c.id}" type="checkbox" class="accent-amber-400" />
@@ -2394,6 +2997,22 @@ function renderGmInspector() {
         </div>
       ` : ''}
 
+      ${tok.role !== 'crawler' ? (() => {
+        const otherMobs = (scene.tokens || []).filter(m => m.role !== 'crawler' && m.id !== tok.id && getTokenHealthMetrics(m).curHp > 0);
+        if (otherMobs.length === 0) return '';
+        return `
+          <div class="bg-dungeon-900 border border-amber-500/35 rounded-lg p-2 space-y-1.5 text-[10px]">
+            <div class="font-mono font-bold uppercase text-amber-300">⚔️ Mob vs. Mob (Table 8 • 1d12)</div>
+            <div class="flex items-center gap-1.5">
+              <select id="npcVsNpcTarget_${tok.id}" class="flex-1 min-w-0 bg-dungeon-950 border border-slate-700 rounded px-1.5 py-1 text-slate-200">
+                ${otherMobs.map(m => `<option value="${m.id}">${m.iconSymbol || '👹'} ${escapeHtmlAttr(m.name)}</option>`).join('')}
+              </select>
+              <button type="button" onclick="executeNpcVsNpcResolution('${tok.id}', document.getElementById('npcVsNpcTarget_${tok.id}')?.value)" class="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold shrink-0">🎲 Clash</button>
+            </div>
+          </div>
+        `;
+      })() : ''}
+
       ${tok.role !== 'crawler' && (tok.lore || tok.aiCommentary) ? `
         <details class="bg-dungeon-900 border border-slate-800 rounded-lg p-2 text-[11px]">
           <summary class="cursor-pointer font-bold text-amber-300 text-[10px] uppercase">📖 Lore & System AI Commentary</summary>
@@ -2402,6 +3021,7 @@ function renderGmInspector() {
         </details>
       ` : ''}
     </div>
+    ${persistentEffectsBoxHtml}
   `;
 }
 
@@ -2545,37 +3165,176 @@ function renderCrawlersRoster() {
   }).join('');
 }
 
+function setBestiaryNeighborhoodFilter(nbName) {
+  uiState.bestiaryNeighborhoodFilter = nbName || 'ALL';
+  renderBestiaryLibrary();
+}
+
 function renderBestiaryLibrary() {
   const listEl = document.getElementById('bestiaryLibraryList');
   if (!listEl) return;
   const q = (document.getElementById('bestiarySearchInput')?.value || '').trim().toLowerCase();
-  const mobs = (appState.bestiary || []).filter(b => b.role !== 'crawler' && (!q || b.name.toLowerCase().includes(q) || (b.classification || '').toLowerCase().includes(q)));
-  listEl.innerHTML = mobs.map(m => `
-    <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-2.5 flex items-center justify-between gap-2">
-      <div class="min-w-0">
-        <div class="font-bold text-xs text-slate-100 truncate">${m.iconSymbol || '👹'} ${m.name} <span class="text-rose-400 font-mono text-[10px]">Lvl ${m.level || 1}</span></div>
-        <div class="text-[10px] font-mono text-slate-400">${m.maxPips || 3} Pips × ${m.hpPerPip || 2} HP • Evade ${getEffectiveEvadeDisplay(m)} • DR ${m.dr || 0}</div>
-      </div>
-      <div class="flex items-center gap-1 shrink-0">
-        <button onclick="deployCharacterTemplateToMap('${m.templateId}')" class="px-2 py-1 rounded-lg bg-rose-500 hover:bg-rose-400 text-slate-950 font-bold text-[11px]">+ Spawn</button>
-        <button onclick="deleteCatalogItem('bestiary', 'templateId', '${m.templateId}')" class="px-1.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-300 text-[11px]">🗑️</button>
-      </div>
+  const allMobs = (appState.bestiary || []).filter(b => b.role !== 'crawler');
+  const knownNeighborhoods = typeof getAllKnownNeighborhoodNames === 'function' ? getAllKnownNeighborhoodNames() : [];
+
+  // Build filter pills for neighborhoods present in bestiary
+  const groupNamesSet = new Set();
+  allMobs.forEach(m => {
+    const nb = String(m.neighborhood || '').trim() || 'Unassigned';
+    groupNamesSet.add(nb);
+  });
+  const groupNames = Array.from(groupNamesSet).sort((a, b) => {
+    if (a === 'Unassigned') return 1;
+    if (b === 'Unassigned') return -1;
+    return a.localeCompare(b);
+  });
+
+  const activeFilter = uiState.bestiaryNeighborhoodFilter || 'ALL';
+  const filteredMobs = allMobs.filter(m => {
+    const nb = String(m.neighborhood || '').trim() || 'Unassigned';
+    if (activeFilter !== 'ALL' && nb !== activeFilter) return false;
+    if (!q) return true;
+    return (
+      m.name.toLowerCase().includes(q) ||
+      (m.classification || '').toLowerCase().includes(q) ||
+      nb.toLowerCase().includes(q) ||
+      (m.quarter || '').toLowerCase().includes(q)
+    );
+  });
+
+  const filterBarHtml = `
+    <div class="flex flex-wrap items-center gap-1 pb-1">
+      <button type="button" onclick="setBestiaryNeighborhoodFilter('ALL')" class="px-2 py-0.5 rounded-lg text-[10px] font-bold transition ${activeFilter === 'ALL' ? 'bg-amber-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800 hover:border-slate-600'}">All (${allMobs.length})</button>
+      ${groupNames.map(g => {
+        const cnt = allMobs.filter(m => (String(m.neighborhood || '').trim() || 'Unassigned') === g).length;
+        return `<button type="button" onclick="setBestiaryNeighborhoodFilter('${escapeHtmlAttr(g).replace(/'/g, "\'")}')" class="px-2 py-0.5 rounded-lg text-[10px] font-bold transition ${activeFilter === g ? 'bg-cyan-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800 hover:border-slate-600'}">${escapeHtmlAttr(g)} (${cnt})</button>`;
+      }).join('')}
     </div>
-  `).join('');
+  `;
+
+  if (filteredMobs.length === 0) {
+    listEl.innerHTML = filterBarHtml + '<div class="text-xs text-slate-500 italic text-center py-4">No matching mobs found.</div>';
+    return;
+  }
+
+  // Group filtered mobs by neighborhood
+  const groupsMap = new Map();
+  filteredMobs.forEach(m => {
+    const nb = String(m.neighborhood || '').trim() || 'Unassigned';
+    if (!groupsMap.has(nb)) groupsMap.set(nb, []);
+    groupsMap.get(nb).push(m);
+  });
+
+  const sortedGroups = Array.from(groupsMap.entries()).sort((a, b) => {
+    if (a[0] === 'Unassigned') return 1;
+    if (b[0] === 'Unassigned') return -1;
+    return a[0].localeCompare(b[0]);
+  });
+
+  const renderMobCard = m => {
+    const isBoss = m.tier === 'Boss' || /boss/i.test(m.classification || '');
+    const curNb = String(m.neighborhood || '').trim();
+    const nbOptions = Array.from(new Set([...knownNeighborhoods, ...(curNb ? [curNb] : [])])).sort();
+    return `
+      <div class="bg-dungeon-950 border ${isBoss ? 'border-amber-500/50' : 'border-slate-800'} rounded-xl p-2.5 space-y-1.5">
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <div class="font-bold text-xs text-slate-100 flex items-center gap-1 flex-wrap">
+              <span class="truncate">${m.iconSymbol || '👹'} ${escapeHtmlAttr(m.name)}</span>
+              <span class="text-rose-400 font-mono text-[10px]">Lvl ${m.level || 1}</span>
+              ${isBoss ? '<span class="px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-400/50 text-amber-200 font-mono text-[9px] font-extrabold">👑 BOSS</span>' : ''}
+            </div>
+            <div class="text-[10px] font-mono text-slate-400">${m.maxPips || 3} Pips × ${m.hpPerPip || 2} HP • Evade ${getEffectiveEvadeDisplay(m)} • DR ${m.dr || 0}</div>
+            ${m.quarter ? `<div class="text-[9.5px] font-mono text-cyan-300/85 mt-0.5">📍 ${escapeHtmlAttr(m.quarter)}</div>` : ''}
+          </div>
+          <div class="flex items-center gap-1 shrink-0">
+            <button onclick="deployCharacterTemplateToMap('${m.templateId}')" class="px-2 py-1 rounded-lg ${isBoss ? 'bg-amber-500 hover:bg-amber-400' : 'bg-rose-500 hover:bg-rose-400'} text-slate-950 font-bold text-[11px]">+ Spawn</button>
+            <label title="Upload / Swap Mob Portrait (PNG, JPG, WEBP, JFIF)" class="cursor-pointer px-1.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px]">
+              🖼️
+              <input type="file" accept="image/*,.jfif" onchange="uploadTokenPortraitImage('${m.templateId}', event, true)" class="hidden" />
+            </label>            <button onclick="deleteCatalogItem('bestiary', 'templateId', '${m.templateId}')" class="px-1.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-300 text-[11px]">🗑️</button>
+          </div>
+        </div>
+        <div class="flex items-center justify-between gap-1.5 pt-1 border-t border-slate-800/70 text-[9.5px] font-mono">
+          <span class="text-slate-500">Neighborhood:</span>
+          <select onchange="setMobTemplateNeighborhood('${m.templateId}', this.value)" class="bg-dungeon-900 border border-slate-700 rounded px-1.5 py-0.5 text-slate-300 text-[9.5px] max-w-[180px]">
+            <option value="" ${!curNb ? 'selected' : ''}>Unassigned</option>
+            ${nbOptions.map(nb => `<option value="${escapeHtmlAttr(nb)}" ${curNb === nb ? 'selected' : ''}>${escapeHtmlAttr(nb)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    `;
+  };
+
+  const sectionsHtml = sortedGroups.map(([nbName, mobsInGroup]) => {
+    const nbPack = typeof CAMPAIGN_NEIGHBORHOODS !== 'undefined'
+      ? CAMPAIGN_NEIGHBORHOODS.find(n => n.name === nbName)
+      : null;
+    // Sort bosses to the bottom or top? Let's put regular mobs first alphabetically, Bosses at the bottom clearly marked
+    const sorted = mobsInGroup.slice().sort((a, b) => {
+      const aBoss = (a.tier === 'Boss' || /boss/i.test(a.classification || '')) ? 1 : 0;
+      const bBoss = (b.tier === 'Boss' || /boss/i.test(b.classification || '')) ? 1 : 0;
+      if (aBoss !== bBoss) return aBoss - bBoss;
+      return a.name.localeCompare(b.name);
+    });
+    return `
+      <details open class="bg-dungeon-900/60 border border-slate-800 rounded-xl p-2 space-y-2">
+        <summary class="cursor-pointer flex items-center justify-between gap-2 text-[11px] font-mono font-bold text-amber-300 select-none">
+          <span>🗺️ ${escapeHtmlAttr(nbName)} (${sorted.length})</span>
+          ${nbPack ? `<button type="button" onclick="event.preventDefault(); openGmCampaignModal('${nbPack.id}')" class="px-1.5 py-0.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-500/40 text-cyan-200 text-[9.5px] font-bold">📖 Guide</button>` : ''}
+        </summary>
+        <div class="space-y-1.5 pt-1">${sorted.map(renderMobCard).join('')}</div>
+      </details>
+    `;
+  }).join('');
+
+  listEl.innerHTML = filterBarHtml + sectionsHtml;
+}
+
+function toggleTrapBuilderFields() {
+  const cat = document.getElementById('newObjCategory')?.value || '';
+  const box = document.getElementById('trapBuilderFields');
+  if (box) box.classList.toggle('hidden', cat !== 'Hazard / Trap');
 }
 
 function handleCreateObjectSubmit(event) {
   event.preventDefault();
   const name = (document.getElementById('newObjName')?.value || '').trim();
   if (!name) return;
+  const category = document.getElementById('newObjCategory')?.value || 'Cover / Obstacle';
+  let trapConfig = null;
+  if (category === 'Hazard / Trap') {
+    const tpRaw = (document.getElementById('newTrapTeleportXY')?.value || '').trim();
+    const tpParts = tpRaw.split(',').map(s => parseInt(s.trim(), 10));
+    trapConfig = {
+      isTrap: true,
+      armed: true,
+      detected: !Boolean(document.getElementById('newObjHidden')?.checked),
+      concealment: document.getElementById('newTrapConcealment')?.value || 'somethings_off',
+      trapKind: document.getElementById('newTrapKind')?.value || 'damage',
+      checksRequired: Math.max(1, Math.min(6, Number(document.getElementById('newTrapChecksReq')?.value) || 1)),
+      checksCompleted: 0,
+      detectDcBase: Math.max(5, Number(document.getElementById('newTrapDetectDc')?.value) || 12),
+      disarmDcBase: Math.max(5, Number(document.getElementById('newTrapDisarmDc')?.value) || 13),
+      hitDcBase: 12,
+      damageExpr: (document.getElementById('newTrapDamageExpr')?.value || 'Fd6').trim(),
+      damageType: 'Piercing',
+      applyDebuff: (document.getElementById('newTrapDebuff')?.value || '').trim(),
+      collapseDrainHours: Math.max(0, Number(document.getElementById('newTrapClockDrain')?.value) || 0),
+      teleportAnchorGx: Number.isFinite(tpParts[0]) ? tpParts[0] : null,
+      teleportAnchorGy: Number.isFinite(tpParts[1]) ? tpParts[1] : null,
+      aoeFt: 0
+    };
+  }
   const tpl = {
     id: 'obj_tpl_' + Date.now(),
     name,
-    category: document.getElementById('newObjCategory')?.value || 'Cover / Obstacle',
+    category,
     iconSymbol: (document.getElementById('newObjIcon')?.value || '📦').trim(),
     color: document.getElementById('newObjColor')?.value || '#10b981',
     lightRadiusFt: Number(document.getElementById('newObjLight')?.value) || 0,
-    notes: (document.getElementById('newObjNotes')?.value || '').trim()
+    notes: (document.getElementById('newObjNotes')?.value || '').trim(),
+    trapConfig
   };
   appState.objectTemplates.push(tpl);
   dropObjectTemplateToMap(tpl.id, Boolean(document.getElementById('newObjHidden')?.checked));
@@ -2586,6 +3345,12 @@ function dropObjectTemplateToMap(tplId, hidden = false) {
   const tpl = (appState.objectTemplates || []).find(o => o.id === tplId);
   const scene = getActiveScene();
   if (!tpl || !scene) return;
+  if ((tpl.category === 'Hazard / Trap' || (tpl.trapConfig && tpl.trapConfig.isTrap)) && /stair|descend|exit/i.test(scene.name || '')) {
+    showVttToast('⚠️ Book Rule Reminder: Traps cannot be placed in rooms with stairwells to lower floors!');
+  }
+  const clonedTrap = tpl.trapConfig
+    ? Object.assign({}, tpl.trapConfig, { armed: true, detected: !hidden, checksCompleted: 0 })
+    : (tpl.category === 'Hazard / Trap' ? { isTrap: true, armed: true, detected: !hidden, concealment: 'somethings_off', trapKind: 'damage', checksRequired: 1, checksCompleted: 0, detectDcBase: 12, disarmDcBase: 13, hitDcBase: 12, damageExpr: 'Fd6', damageType: 'Piercing', applyDebuff: '', collapseDrainHours: 0, teleportAnchorGx: null, teleportAnchorGy: null, aoeFt: 0 } : null);
   scene.mapObjects = scene.mapObjects || [];
   scene.mapObjects.push({
     id: 'mapobj_' + Date.now(),
@@ -2597,6 +3362,7 @@ function dropObjectTemplateToMap(tplId, hidden = false) {
     lightRadiusFt: tpl.lightRadiusFt || 0,
     notes: tpl.notes || '',
     hiddenFromPlayers: hidden,
+    trapConfig: clonedTrap,
     gx: 5,
     gy: 5
   });
@@ -2618,7 +3384,10 @@ function renderObjectsCatalog() {
     activeEl.innerHTML = (scene.mapObjects || []).map(o => `
       <div class="bg-dungeon-950 border border-slate-800 rounded-lg px-2 py-1.5 flex items-center justify-between text-xs">
         <span class="truncate">${o.iconSymbol || '📦'} <b>${o.name}</b> <span class="text-[10px] font-mono text-slate-400">(${o.gx}, ${o.gy})</span></span>
-        <button onclick="removeActiveSceneObject('${o.id}')" class="text-rose-400 hover:text-rose-300 text-xs font-bold">✕</button>
+        <div class="flex items-center gap-1 shrink-0">
+          ${(o.category === 'Hazard / Trap' || (o.trapConfig && o.trapConfig.isTrap)) ? `<button type="button" onclick="executeSpringTrapOnHost('${o.id}', uiState.selectedTokenId || '', false)" title="Spring Trap Now" class="px-1.5 py-0.5 rounded bg-rose-500/25 hover:bg-rose-500/40 border border-rose-500/40 text-rose-200 text-[9.5px] font-bold">💥 Spring</button>` : ''}
+          <button onclick="removeActiveSceneObject('${o.id}')" class="text-rose-400 hover:text-rose-300 text-xs font-bold">✕</button>
+        </div>
       </div>
     `).join('') || '<div class="text-[11px] text-slate-500 italic">No objects placed on this map.</div>';
   }
@@ -2631,10 +3400,58 @@ function renderObjectsCatalog() {
           <div class="font-bold text-slate-100 truncate">${o.iconSymbol || '📦'} ${o.name}</div>
           <div class="text-[10px] text-slate-400 truncate">${o.category}${o.lightRadiusFt ? ` • ${o.lightRadiusFt}ft Light` : ''}</div>
         </div>
-        <button onclick="dropObjectTemplateToMap('${o.id}')" class="px-2 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-[11px] shrink-0">+ Drop</button>
+        <div class="flex items-center gap-1 shrink-0">
+          ${o.category === 'Hazard / Trap' ? `<button onclick="dropObjectTemplateToMap('${o.id}', true)" title="Drop Hidden Trap on Map" class="px-1.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 border border-rose-500/40 text-rose-200 font-bold text-[10px]">🕵️ Trap</button>` : ''}
+          <button onclick="dropObjectTemplateToMap('${o.id}')" class="px-2 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-[11px]">+ Drop</button>
+        </div>
       </div>
     `).join('');
   }
+}
+
+function handleCreateCustomSkillSubmit(event) {
+  event.preventDefault();
+  const name = (document.getElementById('newCustomSkillName')?.value || '').trim();
+  if (!name) return;
+  const group = document.getElementById('newCustomSkillGroup')?.value || 'attack';
+  const hitStat = document.getElementById('newCustomSkillStat')?.value || (group === 'attack' ? 'Str' : 'Dex');
+  const range = (document.getElementById('newCustomSkillRange')?.value || (group === 'attack' ? '5 feet' : 'Self')).trim();
+  const baseDamage = (document.getElementById('newCustomSkillDmg')?.value || '').trim();
+  const desc = (document.getElementById('newCustomSkillDesc')?.value || '').trim();
+  const isPassive = Boolean(document.getElementById('newCustomSkillPassive')?.checked);
+  const upgrades = [
+    (document.getElementById('newCustomSkillR5')?.value || '').trim(),
+    (document.getElementById('newCustomSkillR10')?.value || '').trim(),
+    (document.getElementById('newCustomSkillR15')?.value || '').trim()
+  ].filter(Boolean).map((txt, idx) => {
+    const tier = idx === 0 ? 5 : idx === 1 ? 10 : 15;
+    return /^Rank\s+\d+/i.test(txt) ? txt : `Rank ${tier}: ${txt}`;
+  });
+
+  appState.skills = appState.skills || [];
+  appState.skills.unshift({
+    id: 'sk_custom_' + Date.now(),
+    name,
+    skillGroup: group,
+    tags: isPassive ? 'Passive, Custom' : 'Custom',
+    range,
+    effectType: isPassive ? 'passive' : (group === 'attack' ? 'attack' : 'buff'),
+    diceFormula: baseDamage,
+    hitStat,
+    applyBuff: '',
+    applyDebuff: '',
+    lightRadiusFt: 0,
+    baseDamage,
+    rank1Effect: desc,
+    description: desc,
+    vfxType: group === 'attack' ? 'slash' : 'aura',
+    vfxColor: group === 'attack' ? '#f59e0b' : '#10b981',
+    upgrades
+  });
+
+  event.target.reset();
+  commitStateChange();
+  showVttToast(`⚔️ Created Custom Skill: ${name}!`);
 }
 
 function renderSkillsCatalog() {
@@ -3093,7 +3910,7 @@ function updatePlayerClaimButtonUi() {
 
 
 // =========================================================================
-// 10B. PLAYER CRAWLER CONTROL HUD (ACTION DECK, UNTRAINED SKILLS & SHEET)
+// 10B. PLAYER CRAWLER CONTROL HUD (10-SLOT HOTLIST, LEARNED, R0 SKILLS, SHEET)
 // =========================================================================
 function togglePlayerControlDeck() {
   if (!IS_PLAYER_WINDOW) return;
@@ -3104,14 +3921,19 @@ function togglePlayerControlDeck() {
 }
 
 function setPlayerDeckTab(tab) {
-  uiState.activePlayerDeckTab = ['actions', 'skills', 'sheet'].includes(tab) ? tab : 'actions';
-  ['actions', 'skills', 'sheet'].forEach(t => {
+  uiState.activePlayerDeckTab = ['actions', 'learned', 'skills', 'items', 'sheet'].includes(tab) ? tab : 'actions';
+  ['actions', 'learned', 'skills', 'items', 'sheet'].forEach(t => {
     const btn = document.getElementById(`playerDeckTabBtn_${t}`);
     if (!btn) return;
     btn.className = uiState.activePlayerDeckTab === t
-      ? 'px-1.5 py-1.5 rounded-lg text-[10px] font-bold bg-cyan-500 text-slate-950 transition'
-      : 'px-1.5 py-1.5 rounded-lg text-[10px] font-semibold bg-dungeon-850 text-slate-300 hover:bg-dungeon-800 transition';
+      ? 'px-1 py-1.5 rounded-lg text-[10px] font-bold bg-cyan-500 text-slate-950 transition'
+      : 'px-1 py-1.5 rounded-lg text-[10px] font-semibold bg-dungeon-850 text-slate-300 hover:bg-dungeon-800 transition';
   });
+  renderPlayerControlDeck();
+}
+
+function setPlayerLearnedSubTab(sub) {
+  uiState.playerLearnedSubTab = ['combat', 'utility', 'spells'].includes(sub) ? sub : 'combat';
   renderPlayerControlDeck();
 }
 
@@ -3120,20 +3942,304 @@ function setPlayerSkillSubTab(sub) {
   renderPlayerControlDeck();
 }
 
-function togglePinUntrainedSkill(entryId) {
-  if (!entryId) return;
-  uiState.pinnedUntrainedSkillIds = uiState.pinnedUntrainedSkillIds || [];
-  if (uiState.pinnedUntrainedSkillIds.includes(entryId)) {
-    uiState.pinnedUntrainedSkillIds = uiState.pinnedUntrainedSkillIds.filter(id => id !== entryId);
+const DCC_QUICK_ITEMS_LIBRARY = [
+  { name: 'Healing Potion', icon: '❤️', category: 'Consumable', qty: 1, notes: 'Restores 5 Health Bar slots.' },
+  { name: 'Mana Potion', icon: '💧', category: 'Consumable', qty: 1, notes: 'Restores full Mana.' },
+  { name: 'Torch', icon: '🔥', category: 'Utility', qty: 1, notes: '20ft bright light / 20ft dim light.' },
+  { name: 'Goblin Dynamite', icon: '🧨', category: 'Explosive', qty: 1, notes: '1d6+ Bludgeoning + 5ft Splash (unstable!).' },
+  { name: 'Bandages', icon: '🩹', category: 'Consumable', qty: 1, notes: 'Stops bleeding / First Aid aid.' },
+  { name: 'Antidote', icon: '🧪', category: 'Consumable', qty: 1, notes: 'Clears Poisoned / Washed debuffs.' },
+  { name: '50ft Rope', icon: '🪢', category: 'Utility', qty: 1, notes: 'Climbing, tying, or makeshift harness.' }
+];
+
+function getCrawlerInventory(tok) {
+  if (!tok) return [];
+  if (!Array.isArray(tok.inventory)) tok.inventory = [];
+  return tok.inventory;
+}
+
+function commitPlayerInventory(tok, nextInv) {
+  if (!tok) return;
+  tok.inventory = Array.isArray(nextInv) ? nextInv : [];
+  if (IS_PLAYER_WINDOW) {
+    sendPlayerInventoryUpdateToHost(tok.id, tok.inventory);
+    renderPlayerControlDeck();
   } else {
-    uiState.pinnedUntrainedSkillIds.push(entryId);
-    const sk = (appState?.skills || []).find(s => s.id === entryId);
-    if (sk) showVttToast(`📌 Added ${sk.name} (Rank 0 • Untrained) to your Actions tab!`);
+    commitStateChange();
+  }
+}
+
+function addItemToCrawlerInventory(tok, itemObj) {
+  if (!tok || !itemObj || !String(itemObj.name || '').trim()) return;
+  const inv = [...getCrawlerInventory(tok)];
+  const cleanName = String(itemObj.name).trim();
+  const addQty = Math.max(1, Math.min(999, Number(itemObj.qty) || 1));
+  const existing = inv.find(i => String(i.name || '').trim().toLowerCase() === cleanName.toLowerCase());
+  if (existing) {
+    existing.qty = Math.min(999, (Number(existing.qty) || 1) + addQty);
+  } else {
+    inv.unshift({
+      id: 'inv_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+      name: cleanName,
+      icon: itemObj.icon || '🎒',
+      category: itemObj.category || 'Utility',
+      qty: addQty,
+      notes: String(itemObj.notes || '').trim()
+    });
+  }
+  commitPlayerInventory(tok, inv);
+  showVttToast(`🎒 Added ${addQty}× ${cleanName} to ${tok.name}'s Inventory`);
+}
+
+function playerAddQuickItem(idx) {
+  const tok = getClaimedCrawlerToken();
+  const tpl = DCC_QUICK_ITEMS_LIBRARY[idx];
+  if (!tok || !tpl) return;
+  addItemToCrawlerInventory(tok, tpl);
+}
+
+function playerAddCustomInventoryItem(event) {
+  if (event) event.preventDefault();
+  const tok = getClaimedCrawlerToken();
+  if (!tok) return;
+  const name = (document.getElementById('pInvCustomName')?.value || '').trim();
+  if (!name) return;
+  addItemToCrawlerInventory(tok, {
+    name,
+    icon: document.getElementById('pInvCustomIcon')?.value || '🎒',
+    category: document.getElementById('pInvCustomCat')?.value || 'Utility',
+    qty: Number(document.getElementById('pInvCustomQty')?.value) || 1,
+    notes: (document.getElementById('pInvCustomNotes')?.value || '').trim()
+  });
+}
+
+function adjustCrawlerInventoryQty(tokenId, itemId, delta) {
+  const tok = IS_PLAYER_WINDOW
+    ? getClaimedCrawlerToken()
+    : getActiveScene()?.tokens.find(t => t.id === tokenId);
+  if (!tok) return;
+  const inv = [...getCrawlerInventory(tok)];
+  const item = inv.find(i => i.id === itemId);
+  if (!item) return;
+  const nextQty = (Number(item.qty) || 1) + delta;
+  if (nextQty <= 0) {
+    commitPlayerInventory(tok, inv.filter(i => i.id !== itemId));
+    showVttToast(`Removed ${item.name} from Inventory`);
+  } else {
+    item.qty = Math.min(999, nextQty);
+    commitPlayerInventory(tok, inv);
+  }
+}
+
+function removeCrawlerInventoryItem(tokenId, itemId) {
+  const tok = IS_PLAYER_WINDOW
+    ? getClaimedCrawlerToken()
+    : getActiveScene()?.tokens.find(t => t.id === tokenId);
+  if (!tok) return;
+  const inv = getCrawlerInventory(tok).filter(i => i.id !== itemId);
+  commitPlayerInventory(tok, inv);
+}
+
+function bindInventoryItemToHotlist(itemId) {
+  const tok = getClaimedCrawlerToken();
+  if (!tok || !itemId) return;
+  const item = getCrawlerInventory(tok).find(i => i.id === itemId);
+  if (!item) return;
+  const slots = [...getOrBuildCrawlerHotlist(tok)];
+  const existingIdx = slots.findIndex(s => s && s.type === 'item' && (s.invId === item.id || String(s.name || '').toLowerCase() === String(item.name || '').toLowerCase()));
+  if (existingIdx !== -1) {
+    slots[existingIdx] = null;
+    commitPlayerHotlist(tok, slots);
+    showVttToast(`Removed ${item.name} from Hotlist Slot #${existingIdx + 1}`);
+    return;
+  }
+  const emptyIdx = slots.findIndex(s => !s);
+  if (emptyIdx === -1) {
+    showVttToast('⚠️ All 10 Hotlist slots are full! Clear a slot on ⚡ Hotlist first.');
+    return;
+  }
+  slots[emptyIdx] = {
+    type: 'item',
+    id: 'item_' + Date.now(),
+    invId: item.id,
+    name: item.name,
+    icon: item.icon || '🎒',
+    qty: item.qty || 1,
+    note: item.notes || 'Instant Hotlist access'
+  };
+  uiState.activeHotlistSlotIdx = emptyIdx;
+  commitPlayerHotlist(tok, slots);
+  showVttToast(`⚡ Bound ${item.name} to Hotlist Slot #${emptyIdx + 1}!`);
+}
+
+function gmQuickGiveItemToCrawler(tokenId, idx) {
+  const tok = getActiveScene()?.tokens.find(t => t.id === tokenId && t.role === 'crawler');
+  const tpl = DCC_QUICK_ITEMS_LIBRARY[idx];
+  if (!tok || !tpl) return;
+  addItemToCrawlerInventory(tok, tpl);
+}
+
+
+function getOrBuildCrawlerHotlist(tok) {
+  if (!tok) return Array(10).fill(null);
+  if (Array.isArray(tok.hotlist)) {
+    const arr = tok.hotlist.slice(0, 10);
+    while (arr.length < 10) arr.push(null);
+    return arr;
+  }
+  // Auto-seed sensible initial Hotlist slots (Heal + Attack Spells + Combat Skills)
+  const slots = Array(10).fill(null);
+  let idx = 0;
+  const spells = tok.assignedSpells || [];
+  const skills = tok.assignedSkills || [];
+
+  const healSp = spells.find(sp => /^heal$/i.test(String(sp.name || '').trim()));
+  if (healSp && idx < 10) slots[idx++] = { type: 'spell', id: healSp.id };
+
+  spells.forEach(sp => {
+    if (idx >= 5) return;
+    if (healSp && sp.id === healSp.id) return;
+    slots[idx++] = { type: 'spell', id: sp.id };
+  });
+
+  skills.forEach(sk => {
+    if (idx >= 8) return;
+    const full = (appState?.skills || []).find(s => s.id === sk.id) || sk;
+    const isCombat = (full.skillGroup === 'attack') || /attack/i.test(full.tags || '') || /\d+d\d+/i.test(full.baseDamage || '');
+    if (isCombat) slots[idx++] = { type: 'skill', id: sk.id };
+  });
+
+  tok.hotlist = slots;
+  return slots;
+}
+
+function commitPlayerHotlist(tok, nextSlots) {
+  if (!tok) return;
+  const cleaned = nextSlots.slice(0, 10);
+  while (cleaned.length < 10) cleaned.push(null);
+  tok.hotlist = cleaned;
+  sendPlayerHotlistUpdateToHost(tok.id, cleaned);
+  renderPlayerControlDeck();
+}
+
+function findHotlistSlotIndex(tok, type, id) {
+  const slots = getOrBuildCrawlerHotlist(tok);
+  return slots.findIndex(s => s && s.type === type && s.id === id);
+}
+
+function toggleAbilityOnHotlist(type, id) {
+  const tok = getClaimedCrawlerToken();
+  if (!tok || !id) return;
+  const slots = [...getOrBuildCrawlerHotlist(tok)];
+  const existingIdx = slots.findIndex(s => s && s.type === type && s.id === id);
+  if (existingIdx !== -1) {
+    slots[existingIdx] = null;
+    if (uiState.activeHotlistSlotIdx === existingIdx) uiState.activeHotlistSlotIdx = null;
+    commitPlayerHotlist(tok, slots);
+    showVttToast(`Removed from Hotlist Slot #${existingIdx + 1}`);
+    return;
+  }
+  const emptyIdx = slots.findIndex(s => !s);
+  if (emptyIdx === -1) {
+    showVttToast('⚠️ All 10 Hotlist slots are full! Clear a slot on the ⚡ Hotlist tab first.');
+    return;
+  }
+  slots[emptyIdx] = { type, id };
+  uiState.activeHotlistSlotIdx = emptyIdx;
+  uiState.hotlistAssignSlotIdx = null;
+  commitPlayerHotlist(tok, slots);
+  showVttToast(`⚡ Bound to Hotlist Slot #${emptyIdx + 1}!`);
+}
+
+function assignEntryToHotlistSlot(slotIdx, type, id) {
+  const tok = getClaimedCrawlerToken();
+  if (!tok || slotIdx < 0 || slotIdx > 9) return;
+  const slots = [...getOrBuildCrawlerHotlist(tok)];
+  // Avoid duplicates of same ability on hotbar
+  const dupIdx = slots.findIndex(s => s && s.type === type && s.id === id);
+  if (dupIdx !== -1) slots[dupIdx] = null;
+  slots[slotIdx] = { type, id };
+  uiState.activeHotlistSlotIdx = slotIdx;
+  uiState.hotlistAssignSlotIdx = null;
+  commitPlayerHotlist(tok, slots);
+  showVttToast(`⚡ Assigned to Hotlist Slot #${slotIdx + 1}`);
+}
+
+function assignQuickItemToHotlistSlot(slotIdx, name, icon = '🧪', qty = 1, note = '') {
+  const tok = getClaimedCrawlerToken();
+  if (!tok || slotIdx < 0 || slotIdx > 9) return;
+  const cleanName = String(name || '').trim();
+  if (!cleanName) return;
+  const slots = [...getOrBuildCrawlerHotlist(tok)];
+  slots[slotIdx] = {
+    type: 'item',
+    id: 'item_' + Date.now(),
+    name: cleanName,
+    icon: icon || '🧪',
+    qty: Math.max(1, Math.min(999, Number(qty) || 1)),
+    note: String(note || '').trim()
+  };
+  uiState.activeHotlistSlotIdx = slotIdx;
+  uiState.hotlistAssignSlotIdx = null;
+  commitPlayerHotlist(tok, slots);
+  showVttToast(`🎒 Placed ${cleanName} in Hotlist Slot #${slotIdx + 1}`);
+}
+
+function handleAddCustomHotlistItem(slotIdx) {
+  const nameIn = document.getElementById('hotlistCustomItemName');
+  const qtyIn = document.getElementById('hotlistCustomItemQty');
+  const iconIn = document.getElementById('hotlistCustomItemIcon');
+  const name = (nameIn?.value || '').trim();
+  if (!name) {
+    showVttToast('Enter an item name first.');
+    return;
+  }
+  assignQuickItemToHotlistSlot(slotIdx, name, iconIn?.value || '🎒', Number(qtyIn?.value) || 1, 'Hotlist item (instant swap)');
+}
+
+function adjustHotlistItemQty(slotIdx, delta) {
+  const tok = getClaimedCrawlerToken();
+  if (!tok) return;
+  const slots = [...getOrBuildCrawlerHotlist(tok)];
+  const item = slots[slotIdx];
+  if (!item || item.type !== 'item') return;
+  const nextQty = (Number(item.qty) || 1) + delta;
+  if (nextQty <= 0) {
+    slots[slotIdx] = null;
+    showVttToast(`Used last ${item.name} (Slot #${slotIdx + 1} cleared)`);
+  } else {
+    slots[slotIdx] = { ...item, qty: Math.min(999, nextQty) };
+    if (delta < 0) showVttToast(`Used ${item.name} (${nextQty} left)`);
+  }
+  commitPlayerHotlist(tok, slots);
+}
+
+function clearHotlistSlot(slotIdx) {
+  const tok = getClaimedCrawlerToken();
+  if (!tok || slotIdx < 0 || slotIdx > 9) return;
+  const slots = [...getOrBuildCrawlerHotlist(tok)];
+  slots[slotIdx] = null;
+  uiState.hotlistAssignSlotIdx = null;
+  commitPlayerHotlist(tok, slots);
+  showVttToast(`Cleared Hotlist Slot #${slotIdx + 1}`);
+}
+
+function selectHotlistSlot(slotIdx) {
+  const tok = getClaimedCrawlerToken();
+  if (!tok) return;
+  const slots = getOrBuildCrawlerHotlist(tok);
+  const slot = slots[slotIdx];
+  if (!slot) {
+    uiState.hotlistAssignSlotIdx = (uiState.hotlistAssignSlotIdx === slotIdx) ? null : slotIdx;
+    uiState.activeHotlistSlotIdx = null;
+  } else {
+    uiState.activeHotlistSlotIdx = slotIdx;
+    uiState.hotlistAssignSlotIdx = null;
   }
   renderPlayerControlDeck();
 }
 
-function playerCastAbility(kind, entryId) {
+function playerCastAbility(kind, entryId, targetSelectId = null) {
   const caster = getClaimedCrawlerToken();
   const scene = getActiveScene();
   if (!caster || !scene) {
@@ -3146,13 +4252,31 @@ function playerCastAbility(kind, entryId) {
   const info = analyzeAbilityEffects(caster, kind, entryId, rank);
   if (!info.entry || info.isPurePassive) return;
 
+  const perm = getCrawlerPhasePermissions(caster);
+  if (perm.locked) {
+    showVttToast(perm.bannerText || '🔒 Actions are locked during this combat step.');
+    return;
+  }
+  if (perm.canInterruptOnly && !isAbilityAnInterrupt(info.entry, info)) {
+    showVttToast(`🔒 Step 2 (React): Only Interrupt actions & ${perm.maxPhaseMoveFt || 10}ft Step are allowed! (${info.entry.name} requires Step 4)`);
+    return;
+  }
+
+  if (caster.role === 'crawler' && ((caster.statuses || []).includes('Dying') || getTokenHealthMetrics(caster).curHp <= 0)) {
+    showVttToast(`💀 ${caster.name} is Dying (0 HP) and cannot take actions!`);
+    return;
+  }
+  if (uiState.autoMoveAp && (appState?.round || 0) > 0 && caster.role === 'crawler' && (caster.currentAp ?? 0) <= 0) {
+    showVttToast(`⚠️ ${caster.name} has 0 AP remaining this round!`);
+    return;
+  }
   if (info.manaCost > 0 && (Number(caster.currentMana) || 0) < info.manaCost) {
     showVttToast(`💧 Not enough Mana for ${info.entry.name} (needs ${info.manaCost} MP, you have ${caster.currentMana || 0} MP).`);
     return;
   }
 
   const validTargets = getValidAbilityTargetsForCaster(caster, info, scene);
-  const selEl = document.getElementById(`playerCastTarget_${kind}_${entryId}`);
+  const selEl = document.getElementById(targetSelectId || `playerCastTarget_${kind}_${entryId}`);
   const requestedId = selEl ? selEl.value : '';
   const target = validTargets.find(t => t.id === requestedId) || validTargets[0];
   if (!target) {
@@ -3160,7 +4284,7 @@ function playerCastAbility(kind, entryId) {
     return;
   }
 
-  sendPlayerCastAbilityToHost(caster.id, kind, entryId, target.id);
+  sendPlayerCastAbilityToHost(caster.id, kind, entryId, target.id, uiState.combatRollMode || 'normal');
   showVttToast(`🎯 Casting ${info.entry.name} on ${target.name}...`);
 }
 
@@ -3174,6 +4298,11 @@ function playerTryUntrainedSkill(entryId, domPrefix = 'untrainedTarget') {
   const entry = (appState?.skills || []).find(s => s.id === entryId);
   if (!entry) return;
   const info = analyzeAbilityEffects(caster, 'skill', entryId, 1);
+  const perm = getCrawlerPhasePermissions(caster);
+  if (perm.locked || (perm.canInterruptOnly && !isAbilityAnInterrupt(entry, info))) {
+    showVttToast(perm.canInterruptOnly ? `🔒 Step 2 (React): ${entry.name} is not an Interrupt (wait for Step 4).` : (perm.bannerText || '🔒 Actions locked during this combat step.'));
+    return;
+  }
 
   let targetId = '';
   if (info.isAttack) {
@@ -3200,9 +4329,20 @@ function executeRemotePlayerUntrainedSkill(tokenId, entryId, targetId = '') {
   if (!caster || !entry) return;
 
   const info = analyzeAbilityEffects(caster, 'skill', entryId, 1);
+  const perm = getCrawlerPhasePermissions(caster);
+  if (perm.locked || (perm.canInterruptOnly && !isAbilityAnInterrupt(entry, info))) {
+    showVttToast(`🔒 Blocked ${caster.name}'s untrained ${entry.name} (wrong combat step).`);
+    return;
+  }
+  if (uiState.autoMoveAp && (appState?.round || 0) > 0 && caster.role === 'crawler') {
+    if ((caster.currentAp ?? 0) <= 0) {
+      showVttToast(`⚠️ ${caster.name} has 0 AP remaining this round!`);
+      return;
+    }
+    caster.currentAp = Math.max(0, (caster.currentAp ?? 2) - 1);
+  }
   const { statKey, mod } = getCrawlerAbilityAttackMod(caster, info);
 
-  // Disadvantage: roll 2d20, take the lowest + 0 Rank + base Stat Mod
   const r1 = Math.floor(Math.random() * 20) + 1;
   const r2 = Math.floor(Math.random() * 20) + 1;
   const nat = Math.min(r1, r2);
@@ -3272,7 +4412,6 @@ function executeRemotePlayerUntrainedSkill(tokenId, entryId, targetId = '') {
     return;
   }
 
-  // Utility / Non-Attack Untrained Skill Check (Disadvantage)
   const flareLevel = nat === 20 ? 'crit' : 'standard';
   broadcastDiceRollEvent({
     title: `${caster.iconSymbol || '⚔️'} ${caster.name} — ${entry.name} (Untrained R0)`,
@@ -3292,7 +4431,7 @@ function executeRemotePlayerUntrainedSkill(tokenId, entryId, targetId = '') {
   showVttToast(`🎲 ${caster.name} tried ${entry.name} untrained (Disadvantage): [${r1}, ${r2}] → ${nat} + ${mod} (${statKey}) = ${total}`);
 }
 
-function executeRemotePlayerAbilityCast(tokenId, kind, entryId, targetId) {
+function executeRemotePlayerAbilityCast(tokenId, kind, entryId, targetId, rollMode = 'normal') {
   if (IS_PLAYER_WINDOW) return;
   const scene = getActiveScene();
   const caster = scene?.tokens.find(t => t.id === tokenId && t.role === 'crawler');
@@ -3303,6 +4442,24 @@ function executeRemotePlayerAbilityCast(tokenId, kind, entryId, targetId) {
   const info = analyzeAbilityEffects(caster, kind, entryId, rank);
   if (!info.entry || info.isPurePassive) return;
 
+  const perm = getCrawlerPhasePermissions(caster);
+  if (perm.locked) {
+    showVttToast(perm.bannerText || '🔒 Actions are locked during this combat step.');
+    return;
+  }
+  if (perm.canInterruptOnly && !isAbilityAnInterrupt(info.entry, info)) {
+    showVttToast(`🔒 Step 2 (React): Only Interrupt actions & ${perm.maxPhaseMoveFt || 10}ft Step are allowed! (${info.entry.name} requires Step 4)`);
+    return;
+  }
+
+  if (caster.role === 'crawler' && ((caster.statuses || []).includes('Dying') || getTokenHealthMetrics(caster).curHp <= 0)) {
+    showVttToast(`💀 ${caster.name} is Dying (0 HP) and cannot take actions!`);
+    return;
+  }
+  if (uiState.autoMoveAp && (appState?.round || 0) > 0 && caster.role === 'crawler' && (caster.currentAp ?? 0) <= 0) {
+    showVttToast(`⚠️ ${caster.name} has 0 AP remaining this round!`);
+    return;
+  }
   if (info.manaCost > 0 && (Number(caster.currentMana) || 0) < info.manaCost) {
     showVttToast(`💧 ${caster.name} tried to cast ${info.entry.name} without enough Mana!`);
     return;
@@ -3312,12 +4469,11 @@ function executeRemotePlayerAbilityCast(tokenId, kind, entryId, targetId) {
   const target = validTargets.find(t => t.id === targetId) || validTargets[0];
   if (!target) return;
 
+  const atkCheck = info.isAttack ? rollCrawlerD20AttackCheck(caster, target, info, rollMode) : null;
   let rolledValue = 0;
   if (info.shieldSlots > 0) rolledValue = info.shieldSlots;
   else if (info.isHeal) rolledValue = rollDccExpressionForCaster(info.healDice, caster);
-  else if (info.isAttack) rolledValue = rollDccExpressionForCaster(info.dmgExpr, caster);
-
-  const atkCheck = info.isAttack ? rollCrawlerD20AttackCheck(caster, target, info) : null;
+  else if (info.isAttack) rolledValue = rollDccExpressionForCaster(info.dmgExpr, caster, Boolean(atkCheck?.crit));
 
   uiState.activeCastPanel = {
     casterId: caster.id,
@@ -3333,6 +4489,209 @@ function executeRemotePlayerAbilityCast(tokenId, kind, entryId, targetId) {
   executeAbilityCastResolution();
 }
 
+function resolveHotlistSlotDisplay(tok, slot) {
+  if (!slot) return null;
+  if (slot.type === 'item') {
+    return {
+      type: 'item',
+      icon: slot.icon || '🧪',
+      name: slot.name || 'Item',
+      badge: `×${slot.qty || 1}`,
+      badgeCls: 'text-emerald-300',
+      slot
+    };
+  }
+  if (slot.type === 'spell') {
+    const learned = (tok.assignedSpells || []).find(a => a.id === slot.id);
+    const full = (appState?.spells || []).find(sp => sp.id === slot.id) || learned;
+    if (!full) return null;
+    const mp = parseInt(String(full.manaCost || '0').replace(/\D+/g, ''), 10) || 0;
+    return {
+      type: 'spell',
+      icon: '✨',
+      name: full.name || 'Spell',
+      badge: mp > 0 ? `${mp} MP` : `R${learned?.rank || 1}`,
+      badgeCls: (mp > 0 && (Number(tok.currentMana) || 0) < mp) ? 'text-rose-400' : 'text-indigo-300',
+      full,
+      rank: learned?.rank || 1,
+      slot
+    };
+  }
+  if (slot.type === 'untrained') {
+    const full = (appState?.skills || []).find(s => s.id === slot.id);
+    if (!full) return null;
+    return {
+      type: 'untrained',
+      icon: (full.skillGroup === 'attack') ? '⚔️' : '🎲',
+      name: full.name,
+      badge: 'R0 Dis',
+      badgeCls: 'text-amber-300',
+      full,
+      rank: 0,
+      slot
+    };
+  }
+  // learned skill
+  const learned = (tok.assignedSkills || []).find(a => a.id === slot.id);
+  const full = (appState?.skills || []).find(s => s.id === slot.id) || learned;
+  if (!full) return null;
+  const isAtk = (full.skillGroup === 'attack') || /attack/i.test(full.tags || '');
+  return {
+    type: 'skill',
+    icon: isAtk ? '⚔️' : '🛠️',
+    name: full.name || 'Skill',
+    badge: `R${learned?.rank || 1}`,
+    badgeCls: 'text-amber-300',
+    full,
+    rank: learned?.rank || 1,
+    slot
+  };
+}
+
+function renderPlayerHotlistActiveSlotBarHtml(tok, scene, slotIdx) {
+  const slots = getOrBuildCrawlerHotlist(tok);
+  const rawSlot = slots[slotIdx];
+  const disp = resolveHotlistSlotDisplay(tok, rawSlot);
+  if (!disp) return '';
+
+  if (disp.type === 'item') {
+    return `
+      <div class="bg-dungeon-950 border border-emerald-500/40 rounded-xl p-2.5 space-y-2">
+        <div class="flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="font-bold text-xs text-emerald-200 truncate">${disp.icon} ${escapeHtmlAttr(disp.name)} <span class="font-mono text-amber-300">(×${disp.slot.qty || 1})</span></div>
+            <div class="text-[10px] text-slate-400">${escapeHtmlAttr(disp.slot.note || 'Instant Hotlist access (no extra inventory action)')}</div>
+          </div>
+          <button type="button" onclick="clearHotlistSlot(${slotIdx})" title="Remove from Hotlist" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 text-[10px] font-bold shrink-0">✕</button>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <button type="button" onclick="adjustHotlistItemQty(${slotIdx}, -1)" class="flex-1 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-[11px] transition">✓ Use 1</button>
+          <button type="button" onclick="adjustHotlistItemQty(${slotIdx}, 1)" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono font-bold text-[11px]">+1</button>
+        </div>
+      </div>
+    `;
+  }
+
+  if (disp.type === 'untrained') {
+    const sk = disp.full;
+    const info = analyzeAbilityEffects(tok, 'skill', sk.id, 1);
+    const { statKey, mod } = getCrawlerAbilityAttackMod(tok, info);
+    const validTargets = info.isAttack ? getValidAbilityTargetsForCaster(tok, info, scene) : [];
+    const targetOptions = validTargets.map(t => `<option value="${t.id}">${t.iconSymbol || ''} ${t.name}</option>`).join('');
+    return `
+      <div class="bg-dungeon-950 border border-amber-500/45 rounded-xl p-2.5 space-y-1.5">
+        <div class="flex items-center justify-between gap-2">
+          <div class="min-w-0 cursor-help" onmouseenter="showEffectHoverInfo('skill', '${encodeURIComponent(String(sk.id))}', 1, '${tok.id}')" onmouseleave="hideEffectHoverInfo()">
+            <div class="font-bold text-xs text-amber-200 truncate">🎲 ${escapeHtmlAttr(sk.name)} <span class="text-[10px] font-mono text-amber-400">(R0 • Disadv)</span></div>
+            <div class="text-[9.5px] font-mono text-slate-400">2d20-low + ${mod} (${statKey}) • 0 Skill Bonus</div>
+          </div>
+          <button type="button" onclick="clearHotlistSlot(${slotIdx})" title="Remove from Hotlist" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 text-[10px] font-bold shrink-0">✕</button>
+        </div>
+        ${info.isAttack ? (validTargets.length === 0 ? `
+          <div class="text-[10px] font-mono text-slate-500 italic">No visible target in range (${info.rangeFt}ft)</div>
+        ` : `
+          <div class="flex items-center gap-1.5">
+            <select id="hotlistUntrainedTarget_${sk.id}" class="flex-1 min-w-0 bg-dungeon-900 border border-slate-700 rounded-lg px-1.5 py-1 text-[10px] text-slate-200">${targetOptions}</select>
+            <button type="button" onclick="playerTryUntrainedSkill('${sk.id}', 'hotlistUntrainedTarget')" class="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] shrink-0">🎲 Try (Dis)</button>
+          </div>
+        `) : `
+          <button type="button" onclick="playerTryUntrainedSkill('${sk.id}', 'hotlistUntrainedTarget')" class="w-full py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px]">🎲 Try Untrained Check (2d20-low + ${mod} ${statKey})</button>
+        `}
+      </div>
+    `;
+  }
+
+  // Learned Skill or Spell
+  const kind = disp.type;
+  const full = disp.full;
+  const info = analyzeAbilityEffects(tok, kind, full.id, disp.rank);
+  const validTargets = info.isPurePassive ? [] : getValidAbilityTargetsForCaster(tok, info, scene);
+  const targetOptions = validTargets.map(t => `<option value="${t.id}">${t.iconSymbol || ''} ${t.name}</option>`).join('');
+  const lowMana = info.manaCost > 0 && (Number(tok.currentMana) || 0) < info.manaCost;
+  const isPreviewing = uiState.previewEffectRange && uiState.previewEffectRange.sourceTokenId === tok.id && uiState.previewEffectRange.label === full.name;
+
+  return `
+    <div class="bg-dungeon-950 border border-cyan-500/45 rounded-xl p-2.5 space-y-1.5">
+      <div class="flex items-center justify-between gap-2">
+        <div class="min-w-0 cursor-help" onmouseenter="showEffectHoverInfo('${kind}', '${encodeURIComponent(String(full.id))}', ${disp.rank}, '${tok.id}')" onmouseleave="hideEffectHoverInfo()">
+          <div class="font-bold text-xs text-slate-100 truncate">${disp.icon} ${escapeHtmlAttr(full.name)} <span class="text-[10px] font-mono text-amber-300">R${disp.rank}</span>${info.manaCost > 0 ? ` <span class="text-[10px] font-mono ${lowMana ? 'text-rose-400' : 'text-indigo-300'}">• ${info.manaCost} MP</span>` : ''}</div>
+          <div class="text-[9.5px] font-mono text-slate-400">Range: <b class="text-rose-300">${info.isSelfOnly ? 'Self' : `${info.rangeFt}ft`}</b>${full.baseDamage ? ` • ${escapeHtmlAttr(String(full.baseDamage).slice(0, 34))}` : ''}</div>
+        </div>
+        <div class="flex items-center gap-1 shrink-0">
+          ${!info.isSelfOnly && !info.isPurePassive ? `
+            <button type="button" onclick="toggleEffectRangePreview('${tok.id}', ${info.rangeFt}, ${info.ignoreLos}, '${String(full.name).replace(/'/g, "\\'")}', '${full.id}')" class="px-1.5 py-0.5 rounded border text-[9px] font-mono font-bold ${isPreviewing ? 'bg-rose-500/30 border-rose-400 text-rose-200' : 'bg-slate-900 border-slate-700 text-slate-300'}">${isPreviewing ? '🔴' : '⭕'}</button>
+          ` : ''}
+          <button type="button" onclick="clearHotlistSlot(${slotIdx})" title="Remove from Hotlist" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 text-[10px] font-bold">✕</button>
+        </div>
+      </div>
+      ${info.isPurePassive ? `
+        <div class="text-[10px] font-mono text-emerald-300">🔒 Passive — Always Active</div>
+      ` : validTargets.length === 0 ? `
+        <div class="text-[10px] font-mono text-slate-500 italic">No visible target in range (${info.rangeFt}ft)</div>
+      ` : `
+        <div class="flex items-center gap-1.5">
+          <select id="hotlistTarget_${slotIdx}" class="flex-1 min-w-0 bg-dungeon-900 border border-slate-700 rounded-lg px-1.5 py-1 text-[10px] text-slate-200">${targetOptions}</select>
+          ${(() => {
+            const pPerm = getCrawlerPhasePermissions(tok);
+            const isInt = isAbilityAnInterrupt(full, info);
+            const phaseBlocked = pPerm.locked || (pPerm.canInterruptOnly && !isInt);
+            const dis = lowMana || phaseBlocked;
+            const lbl = phaseBlocked ? (pPerm.canInterruptOnly ? '🔒 Step 4' : '🔒 Wait') : (pPerm.canInterruptOnly && isInt ? '⚡ Interrupt' : `🎯 ${kind === 'skill' ? 'Use' : 'Cast'}`);
+            return `<button type="button" ${dis ? 'disabled' : ''} onclick="playerCastAbility('${kind}', '${full.id}', 'hotlistTarget_${slotIdx}')" class="px-3 py-1 rounded-lg font-bold text-[10px] shrink-0 transition ${dis ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : (pPerm.canInterruptOnly ? 'bg-cyan-400 hover:bg-cyan-300 text-slate-950 shadow' : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow')}">${lbl}</button>`;
+          })()}
+        </div>
+      `}
+      ${renderAbilityUpgradesDropdownHtml(full, disp.rank)}
+    </div>
+  `;
+}
+
+function renderHotlistAssignPickerHtml(tok, slotIdx) {
+  const spells = tok.assignedSpells || [];
+  const skills = tok.assignedSkills || [];
+  return `
+    <div class="bg-dungeon-950 border border-amber-500/45 rounded-xl p-2.5 space-y-2 text-[10px]">
+      <div class="flex items-center justify-between">
+        <span class="font-mono font-bold text-amber-300 uppercase">➕ Assign Hotlist Slot #${slotIdx + 1}</span>
+        <button type="button" onclick="uiState.hotlistAssignSlotIdx=null; renderPlayerControlDeck()" class="text-slate-400 hover:text-slate-200 font-bold">✕</button>
+      </div>
+      ${spells.length > 0 ? `
+        <div class="space-y-1">
+          <div class="text-[9px] font-mono text-indigo-300 uppercase">Learned Spells</div>
+          <div class="flex flex-wrap gap-1">
+            ${spells.map(sp => `<button type="button" onclick="assignEntryToHotlistSlot(${slotIdx}, 'spell', '${sp.id}')" class="px-2 py-0.5 rounded bg-indigo-500/20 hover:bg-indigo-500/35 border border-indigo-500/40 text-indigo-200 font-semibold">✨ ${escapeHtmlAttr(sp.name)}</button>`).join('')}
+          </div>
+        </div>
+      ` : ''}
+      ${skills.length > 0 ? `
+        <div class="space-y-1">
+          <div class="text-[9px] font-mono text-amber-300 uppercase">Learned Skills</div>
+          <div class="flex flex-wrap gap-1">
+            ${skills.map(sk => `<button type="button" onclick="assignEntryToHotlistSlot(${slotIdx}, 'skill', '${sk.id}')" class="px-2 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/35 text-amber-200 font-semibold">⚔️ ${escapeHtmlAttr(sk.name)}</button>`).join('')}
+          </div>
+        </div>
+      ` : ''}
+      <div class="space-y-1 pt-1 border-t border-slate-800">
+        <div class="text-[9px] font-mono text-emerald-300 uppercase">Quick Consumables / Gear (Up to 999 per Slot)</div>
+        <div class="flex flex-wrap gap-1">
+          <button type="button" onclick="assignQuickItemToHotlistSlot(${slotIdx}, 'Healing Potion', '❤️', 2, 'Heals 5 Health Bar slots')" class="px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-200">❤️ Healing Potion</button>
+          <button type="button" onclick="assignQuickItemToHotlistSlot(${slotIdx}, 'Mana Potion', '💧', 5, 'Restores full Mana')" class="px-2 py-0.5 rounded bg-sky-500/15 hover:bg-sky-500/30 border border-sky-500/40 text-sky-200">💧 Mana Potion</button>
+          <button type="button" onclick="assignQuickItemToHotlistSlot(${slotIdx}, 'Torch', '🔥', 5, '20ft bright / 20ft dim light')" class="px-2 py-0.5 rounded bg-orange-500/15 hover:bg-orange-500/30 border border-orange-500/40 text-orange-200">🔥 Torch</button>
+          <button type="button" onclick="assignQuickItemToHotlistSlot(${slotIdx}, 'Dynamite', '🧨', 1, '1d6 Bludgeoning + 5ft Splash')" class="px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200">🧨 Dynamite</button>
+        </div>
+        <div class="flex gap-1 pt-1">
+          <select id="hotlistCustomItemIcon" class="bg-dungeon-900 border border-slate-700 rounded px-1 py-1 text-xs">
+            <option value="🧪">🧪</option><option value="🗡️">🗡️</option><option value="📜">📜</option><option value="🧨">🧨</option><option value="🔥">🔥</option><option value="🎒">🎒</option>
+          </select>
+          <input id="hotlistCustomItemName" type="text" placeholder="Custom item/weapon..." class="flex-1 min-w-0 bg-dungeon-900 border border-slate-700 rounded px-2 py-1 text-[10px] text-slate-100" />
+          <input id="hotlistCustomItemQty" type="number" value="1" min="1" max="999" class="w-12 bg-dungeon-900 border border-slate-700 rounded px-1 py-1 text-center font-mono text-[10px] text-slate-100" />
+          <button type="button" onclick="handleAddCustomHotlistItem(${slotIdx})" class="px-2 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold">Add</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderPlayerAbilityRowHtml(tok, kind, item, scene) {
   const catalog = kind === 'skill' ? (appState?.skills || []) : (appState?.spells || []);
   const full = catalog.find(e => e.id === item.id) || item;
@@ -3342,6 +4701,7 @@ function renderPlayerAbilityRowHtml(tok, kind, item, scene) {
   const targetOptions = validTargets.map(t => `<option value="${t.id}">${t.iconSymbol || ''} ${t.name}</option>`).join('');
   const isPreviewing = uiState.previewEffectRange && uiState.previewEffectRange.sourceTokenId === tok.id && uiState.previewEffectRange.label === name;
   const lowMana = info.manaCost > 0 && (Number(tok.currentMana) || 0) < info.manaCost;
+  const hotlistIdx = findHotlistSlotIndex(tok, kind, item.id);
 
   return `
     <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-2 space-y-1.5">
@@ -3350,7 +4710,12 @@ function renderPlayerAbilityRowHtml(tok, kind, item, scene) {
           <span class="font-bold text-[11px] text-slate-100 hover:text-amber-300 underline decoration-dotted decoration-slate-600 truncate">${kind === 'skill' ? '⚔️' : '✨'} ${escapeHtmlAttr(name)}</span>
           ${info.manaCost > 0 ? `<span class="ml-1 text-[9px] font-mono ${lowMana ? 'text-rose-400 font-bold' : 'text-indigo-300'}">${info.manaCost} MP</span>` : ''}
         </div>
-        <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] font-bold text-amber-300 shrink-0">R${item.rank || 1}</span>
+        <div class="flex items-center gap-1 shrink-0">
+          <button type="button" onclick="toggleAbilityOnHotlist('${kind}', '${item.id}')" title="${hotlistIdx !== -1 ? 'Remove from 10-slot Hotlist' : 'Add to 10-slot Hotlist'}" class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold border transition ${hotlistIdx !== -1 ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200' : 'bg-slate-900 border-slate-700 text-slate-300 hover:border-cyan-400'}">
+            ${hotlistIdx !== -1 ? `⚡ #${hotlistIdx + 1}` : '+ Hotlist'}
+          </button>
+          <span title="${item.markedForAdvancement ? 'Marked for Skill Advancement Check' : 'Skill Rank'}" class="px-1.5 py-0.2 rounded bg-slate-900 border ${item.markedForAdvancement ? 'border-amber-400 text-amber-200' : 'border-slate-700 text-amber-300'} font-mono text-[10px] font-bold">R${item.rank || 1}${item.markedForAdvancement ? '★' : ''}</span>
+        </div>
       </div>
       ${info.isPurePassive ? `
         <div class="text-[10px] font-mono text-emerald-300/90 bg-emerald-950/30 border border-emerald-500/30 rounded px-2 py-1">
@@ -3374,9 +4739,14 @@ function renderPlayerAbilityRowHtml(tok, kind, item, scene) {
             <select id="playerCastTarget_${kind}_${item.id}" class="flex-1 min-w-0 bg-dungeon-900 border border-slate-700 rounded-lg px-1.5 py-1 text-[10px] text-slate-200">
               ${targetOptions}
             </select>
-            <button type="button" ${lowMana ? 'disabled' : ''} onclick="playerCastAbility('${kind}', '${item.id}')" class="px-2.5 py-1 rounded-lg font-bold text-[10px] shrink-0 transition ${lowMana ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow'}">
-              🎯 ${kind === 'skill' ? 'Use' : 'Cast'}
-            </button>
+            ${(() => {
+              const pPerm = getCrawlerPhasePermissions(tok);
+              const isInt = isAbilityAnInterrupt(full, info);
+              const phaseBlocked = pPerm.locked || (pPerm.canInterruptOnly && !isInt);
+              const dis = lowMana || phaseBlocked;
+              const lbl = phaseBlocked ? (pPerm.canInterruptOnly ? '🔒 Step 4' : '🔒 Wait') : (pPerm.canInterruptOnly && isInt ? '⚡ Interrupt' : `🎯 ${kind === 'skill' ? 'Use' : 'Cast'}`);
+              return `<button type="button" ${dis ? 'disabled' : ''} onclick="playerCastAbility('${kind}', '${item.id}')" class="px-2.5 py-1 rounded-lg font-bold text-[10px] shrink-0 transition ${dis ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : (pPerm.canInterruptOnly ? 'bg-cyan-400 hover:bg-cyan-300 text-slate-950 shadow' : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow')}">${lbl}</button>`;
+            })()}
           </div>
         `}
       `}
@@ -3385,12 +4755,12 @@ function renderPlayerAbilityRowHtml(tok, kind, item, scene) {
   `;
 }
 
-function renderPlayerUntrainedSkillRowHtml(tok, sk, scene, isPinnedView = false) {
+function renderPlayerUntrainedSkillRowHtml(tok, sk, scene) {
   const info = analyzeAbilityEffects(tok, 'skill', sk.id, 1);
   const { statKey, mod } = getCrawlerAbilityAttackMod(tok, info);
   const isAtk = info.isAttack;
-  const isPinned = (uiState.pinnedUntrainedSkillIds || []).includes(sk.id);
-  const domPrefix = isPinnedView ? 'pinnedUntrainedTarget' : 'browseUntrainedTarget';
+  const hotlistIdx = findHotlistSlotIndex(tok, 'untrained', sk.id);
+  const domPrefix = 'browseUntrainedTarget';
   const validTargets = isAtk ? getValidAbilityTargetsForCaster(tok, info, scene) : [];
   const targetOptions = validTargets.map(t => `<option value="${t.id}">${t.iconSymbol || ''} ${t.name}</option>`).join('');
   const isPreviewing = uiState.previewEffectRange && uiState.previewEffectRange.sourceTokenId === tok.id && uiState.previewEffectRange.label === sk.name;
@@ -3405,11 +4775,11 @@ function renderPlayerUntrainedSkillRowHtml(tok, sk, scene, isPinnedView = false)
           </div>
           <div class="text-[9.5px] font-mono text-slate-400 mt-0.5">2d20-low + ${mod} (${statKey}) • 0 Skill Bonus</div>
         </div>
-        <button type="button" onclick="togglePinUntrainedSkill('${sk.id}')" title="${isPinned ? 'Remove from Actions tab' : 'Pin to Actions tab for quick access (does not learn)'}" class="px-1.5 py-0.5 rounded-lg text-[9.5px] font-bold shrink-0 transition ${isPinned ? 'bg-slate-800 hover:bg-slate-700 text-rose-300' : 'bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-500/40 text-cyan-200'}">
-          ${isPinned ? '✕ Unpin' : '+ Pin'}
+        <button type="button" onclick="toggleAbilityOnHotlist('untrained', '${sk.id}')" title="${hotlistIdx !== -1 ? 'Remove from Hotlist' : 'Bind to 10-slot Hotlist (does not learn)'}" class="px-1.5 py-0.5 rounded-lg text-[9.5px] font-bold shrink-0 border transition ${hotlistIdx !== -1 ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200' : 'bg-slate-900 border-slate-700 text-cyan-200 hover:border-cyan-400'}">
+          ${hotlistIdx !== -1 ? `⚡ #${hotlistIdx + 1}` : '+ Hotlist'}
         </button>
       </div>
-      ${!isPinnedView && (sk.rank1Effect || sk.description) ? `<p class="text-[10.5px] text-slate-300 leading-snug">${escapeHtmlAttr(sk.rank1Effect || sk.description)}</p>` : ''}
+      ${(sk.rank1Effect || sk.description) ? `<p class="text-[10.5px] text-slate-300 leading-snug">${escapeHtmlAttr(sk.rank1Effect || sk.description)}</p>` : ''}
       ${isAtk ? `
         <div class="flex items-center justify-between gap-1.5 text-[9px] font-mono">
           <span class="text-slate-400">Range: <b class="text-rose-300">${info.rangeFt}ft</b></span>
@@ -3455,7 +4825,7 @@ function renderPlayerControlDeck() {
       <div class="bg-dungeon-950 border border-slate-800 rounded-2xl p-5 text-center space-y-3">
         <div class="text-3xl">🎭</div>
         <div class="font-display font-bold text-sm text-cyan-300">No Crawler Claimed</div>
-        <p class="text-[11px] text-slate-400 leading-relaxed">Claim an existing crawler on the map or build a brand-new Floor 1 crawler to unlock your live stats, movement rings, and combat action deck.</p>
+        <p class="text-[11px] text-slate-400 leading-relaxed">Claim an existing crawler on the map or build a brand-new Floor 1 crawler to unlock your live stats, 10-slot Hotlist, and skills.</p>
         <div class="flex flex-col gap-2 pt-1">
           <button type="button" onclick="openPlayerClaimModal()" class="w-full py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs transition">🎭 Claim Existing Crawler</button>
           <button type="button" onclick="openPlayerCreateCrawlerModal()" class="w-full py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-500/50 text-emerald-200 font-bold text-xs transition">🧙 Create New Crawler</button>
@@ -3508,12 +4878,106 @@ function renderPlayerControlDeck() {
     </div>
   `;
 
+  const incomingAtks = typeof getIncomingDeclaredAttacksForCrawler === 'function'
+    ? getIncomingDeclaredAttacksForCrawler(tok.id, scene)
+    : [];
+  const isEvadingThisRound = (appState?.round || 0) > 0 && tok.evadeDeclaredRound === appState.round;
+  const dodgeR15 = (tok.assignedSkills || []).some(s => /^dodge$/i.test(String(s.name || '').trim()) && (Number(s.rank) || 1) >= 15);
+  const pPermNow = getCrawlerPhasePermissions(tok);
+  const targetedHudHtml = incomingAtks.length > 0 ? `
+    <div class="bg-rose-950/60 border-2 border-rose-500/80 rounded-xl p-2.5 space-y-2 shadow-lg shadow-rose-950/60">
+      <div class="flex items-center justify-between gap-2">
+        <span class="font-display font-bold text-xs text-rose-200 tracking-wide">🎯 YOU ARE BEING TARGETED (${incomingAtks.length})</span>
+        <span class="text-[9.5px] font-mono text-rose-300">Evade ${effectiveEvade}</span>
+      </div>
+      <div class="space-y-1">
+        ${incomingAtks.map(d => `
+          <div class="bg-dungeon-950/90 border border-rose-500/35 rounded-lg px-2 py-1 flex items-center justify-between gap-2 text-[10px]">
+            <span class="font-bold text-slate-100 truncate">${d.mobIcon || '👹'} ${escapeHtmlAttr(d.mobName)} — <span class="text-amber-300">${escapeHtmlAttr(d.atkName)}</span></span>
+            <span class="font-mono text-[9.5px] text-rose-300 shrink-0">${d.isAoe ? '💥 AoE • ' : ''}${escapeHtmlAttr(d.damage)}</span>
+          </div>
+        `).join('')}
+      </div>
+      <div class="text-[9.5px] font-mono text-rose-200/85 leading-snug">
+        1 Evade Action covers <b>all ${incomingAtks.length} incoming ${incomingAtks.length === 1 ? 'attack' : 'attacks'}</b> (separate Evade Check rolled per attack).
+      </div>
+      ${isEvadingThisRound ? `
+        <div class="flex items-center gap-1.5">
+          <div class="flex-1 py-1.5 px-2 rounded-lg bg-emerald-500/25 border border-emerald-400 text-emerald-200 font-mono font-extrabold text-[10px] text-center">
+            ✓ EVADE DECLARED (${incomingAtks.length})
+          </div>
+          <button type="button" onclick="playerCancelEvadeAll()" title="Cancel Evade & refund AP" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-rose-300 font-bold text-[10px] shrink-0 transition">✕ Undo</button>
+        </div>
+      ` : `
+        <button type="button" ${pPermNow.locked ? 'disabled' : ''} onclick="playerDeclareEvadeAll()" class="w-full py-1.5 px-2.5 rounded-lg font-extrabold text-[11px] shadow transition ${pPermNow.locked ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-cyan-400 hover:bg-cyan-300 text-slate-950'}">
+          ${pPermNow.locked ? '🔒 Wait for Step 2 (React) to Evade' : `🛡️ Evade ALL Incoming (${dodgeR15 ? '0 AP • Dodge R15' : '-1 AP'})`}
+        </button>
+      `}
+    </div>
+  ` : '';
+
+  // TAB 2: DEDICATED LEARNED SKILLS & SPELLS TAB (COMBAT / UTILITY / SPELLS TOGGLES)
+  if (uiState.activePlayerDeckTab === 'learned') {
+    const sub = uiState.playerLearnedSubTab || 'combat';
+    const q = String(uiState.playerLearnedSearch || '').trim().toLowerCase();
+    const combatSkills = skills.filter(sk => {
+      const full = (appState?.skills || []).find(s => s.id === sk.id) || sk;
+      return (full.skillGroup === 'attack') || /attack/i.test(full.tags || '') || /\d+d\d+/i.test(full.baseDamage || '');
+    });
+    const combatIds = new Set(combatSkills.map(s => s.id));
+    const utilitySkills = skills.filter(sk => !combatIds.has(sk.id));
+
+    const activeElId = document.activeElement?.id;
+    const selPos = document.activeElement?.selectionStart;
+
+    let listHtml = '';
+    if (sub === 'combat') {
+      const shown = combatSkills.filter(sk => !q || String(sk.name || '').toLowerCase().includes(q));
+      listHtml = shown.length === 0
+        ? '<div class="text-xs text-slate-500 italic text-center py-4">No learned combat skills match.</div>'
+        : shown.map(sk => renderPlayerAbilityRowHtml(tok, 'skill', sk, scene)).join('');
+    } else if (sub === 'utility') {
+      const shown = utilitySkills.filter(sk => !q || String(sk.name || '').toLowerCase().includes(q));
+      listHtml = shown.length === 0
+        ? '<div class="text-xs text-slate-500 italic text-center py-4">No learned utility skills match.</div>'
+        : shown.map(sk => renderPlayerAbilityRowHtml(tok, 'skill', sk, scene)).join('');
+    } else {
+      const shown = spells.filter(sp => !q || String(sp.name || '').toLowerCase().includes(q));
+      listHtml = shown.length === 0
+        ? '<div class="text-xs text-slate-500 italic text-center py-4">No learned spells match.</div>'
+        : shown.map(sp => renderPlayerAbilityRowHtml(tok, 'spell', sp, scene)).join('');
+    }
+
+    body.innerHTML = `
+      ${targetedHudHtml}
+      <div class="grid grid-cols-3 gap-1">
+        <button type="button" onclick="setPlayerLearnedSubTab('combat')" class="py-1.5 px-1 rounded-lg text-[10px] font-bold transition ${sub === 'combat' ? 'bg-rose-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800 hover:border-slate-700'}">⚔️ Combat (${combatSkills.length})</button>
+        <button type="button" onclick="setPlayerLearnedSubTab('utility')" class="py-1.5 px-1 rounded-lg text-[10px] font-bold transition ${sub === 'utility' ? 'bg-cyan-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800 hover:border-slate-700'}">🛠️ Utility (${utilitySkills.length})</button>
+        <button type="button" onclick="setPlayerLearnedSubTab('spells')" class="py-1.5 px-1 rounded-lg text-[10px] font-bold transition ${sub === 'spells' ? 'bg-indigo-500 text-white' : 'bg-dungeon-950 text-slate-300 border border-slate-800 hover:border-slate-700'}">✨ Spells (${spells.length})</button>
+      </div>
+      <input id="playerLearnedSearchInput" type="text" value="${escapeHtmlAttr(uiState.playerLearnedSearch || '')}" oninput="uiState.playerLearnedSearch=this.value; renderPlayerControlDeck()" placeholder="Filter learned abilities..." class="w-full bg-dungeon-950 border border-slate-700 focus:border-cyan-400 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none" />
+      <div class="space-y-2">${listHtml}</div>
+    `;
+
+    if (activeElId === 'playerLearnedSearchInput') {
+      const inp = document.getElementById('playerLearnedSearchInput');
+      if (inp) {
+        inp.focus();
+        if (typeof selPos === 'number') inp.setSelectionRange(selPos, selPos);
+      }
+    }
+    return;
+  }
+
+  // TAB 3: UNTRAINED (RANK 0 • DISADVANTAGE) SKILL BROWSER
   if (uiState.activePlayerDeckTab === 'skills') {
     const learnedIds = new Set(skills.map(s => s.id));
     const q = String(uiState.playerSkillSearch || '').trim().toLowerCase();
     const sub = uiState.playerSkillSubTab || 'all';
     const allSkills = (appState?.skills || []).filter(s => {
       if (learnedIds.has(s.id)) return false;
+      // Ch. 4 Rule: Passive Skills cannot be used untrained (Rank 0)
+      if (normalizeAbilityEffectType(s.effectType) === 'passive' || /\bpassive\b/i.test(s.tags || '')) return false;
       if (sub !== 'all' && (s.skillGroup || 'utility') !== sub) return false;
       if (!q) return true;
       return s.name.toLowerCase().includes(q) || (s.tags || '').toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q);
@@ -3523,20 +4987,20 @@ function renderPlayerControlDeck() {
     const selPos = document.activeElement?.selectionStart;
 
     body.innerHTML = `
-      <div class="bg-amber-950/35 border border-amber-500/40 rounded-xl p-2.5 text-[10.5px] text-amber-200/95 space-y-1">
-        <div class="font-bold text-amber-300">📚 Untrained Skills (Rank 0 • Disadvantage)</div>
-        <p class="leading-snug text-amber-100/85">Attempt any untrained skill by rolling <b>2d20 (take lowest) + base Stat Mod</b> with <b>0 skill bonus</b>. Pin a skill to your Actions tab to try it easily—this does not learn it automatically.</p>
+      <div class="bg-amber-950/35 border border-amber-500/40 rounded-xl p-2 text-[10px] text-amber-200/95 space-y-0.5">
+        <div class="font-bold text-amber-300">🎲 Untrained Skills (Rank 0 • Disadvantage)</div>
+        <p class="leading-snug text-amber-100/85">Roll <b>2d20 (lowest) + base Stat Mod</b> with <b>0 skill bonus</b>. Passive Skills cannot be used untrained (Rank 0).</p>
       </div>
       <div class="flex items-center gap-1">
         <button type="button" onclick="setPlayerSkillSubTab('all')" class="px-2 py-1 rounded-lg text-[10px] font-bold ${sub === 'all' ? 'bg-amber-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800'}">All</button>
-        <button type="button" onclick="setPlayerSkillSubTab('attack')" class="px-2 py-1 rounded-lg text-[10px] font-bold ${sub === 'attack' ? 'bg-rose-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800'}">⚔️ Attack</button>
+        <button type="button" onclick="setPlayerSkillSubTab('attack')" class="px-2 py-1 rounded-lg text-[10px] font-bold ${sub === 'attack' ? 'bg-rose-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800'}">⚔️ Combat</button>
         <button type="button" onclick="setPlayerSkillSubTab('utility')" class="px-2 py-1 rounded-lg text-[10px] font-bold ${sub === 'utility' ? 'bg-cyan-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800'}">🛠️ Utility</button>
       </div>
-      <input id="playerSkillsSearchInput" type="text" value="${escapeHtmlAttr(uiState.playerSkillSearch || '')}" oninput="uiState.playerSkillSearch=this.value; renderPlayerControlDeck()" placeholder="Search all skills to try untrained..." class="w-full bg-dungeon-950 border border-slate-700 focus:border-amber-400 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none" />
+      <input id="playerSkillsSearchInput" type="text" value="${escapeHtmlAttr(uiState.playerSkillSearch || '')}" oninput="uiState.playerSkillSearch=this.value; renderPlayerControlDeck()" placeholder="Search untrained skills..." class="w-full bg-dungeon-950 border border-slate-700 focus:border-amber-400 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none" />
       <div class="space-y-2">
         ${allSkills.length === 0
           ? '<div class="text-xs text-slate-500 italic text-center py-4">No matching untrained skills found.</div>'
-          : allSkills.map(sk => renderPlayerUntrainedSkillRowHtml(tok, sk, scene, false)).join('')
+          : allSkills.map(sk => renderPlayerUntrainedSkillRowHtml(tok, sk, scene)).join('')
         }
       </div>
     `;
@@ -3551,12 +5015,276 @@ function renderPlayerControlDeck() {
     return;
   }
 
+  // TAB 4: ITEMS & UNLIMITED WEIGHTLESS INVENTORY
+  if (uiState.activePlayerDeckTab === 'items') {
+    const inv = getCrawlerInventory(tok);
+    const q = String(uiState.playerItemSearch || '').trim().toLowerCase();
+    const cat = uiState.playerItemCategory || 'All';
+    const slots = getOrBuildCrawlerHotlist(tok);
+
+    const filtered = inv.filter(it => {
+      if (cat !== 'All' && (it.category || 'Utility') !== cat) return false;
+      if (!q) return true;
+      return String(it.name || '').toLowerCase().includes(q) || String(it.notes || '').toLowerCase().includes(q);
+    });
+
+    const activeElId = document.activeElement?.id;
+    const selPos = document.activeElement?.selectionStart;
+
+    body.innerHTML = `
+      <div class="bg-emerald-950/30 border border-emerald-500/40 rounded-xl p-2 text-[10px] text-emerald-200/95 space-y-1">
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex items-center gap-1.5"><span class="font-bold text-emerald-300">🎒 Unlimited Inventory (${inv.length})</span><button type="button" onclick="openCraftingModal()" class="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/35 border border-amber-400/50 text-amber-200 font-bold text-[9.5px]">🛠️ Craft</button></div>
+          <span class="px-2 py-0.5 rounded-lg bg-amber-500/20 border border-amber-400/50 font-mono font-bold text-amber-200">🪙 ${(Number(tok.gold) || 0).toLocaleString()} Gold</span>
+        </div>
+        <p class="leading-snug text-emerald-100/80">Items have <b>0 weight</b> while stored here. All Gold fits in a single protected Inventory slot.</p>
+      </div>
+      ${(() => {
+        const deadMobs = typeof getDeadUnlootedMobsInScene === 'function' ? getDeadUnlootedMobsInScene(scene) : [];
+        if (deadMobs.length === 0) return '';
+        return `
+          <div class="bg-amber-950/35 border border-amber-500/50 rounded-xl p-2 space-y-1.5">
+            <div class="flex items-center justify-between gap-1">
+              <span class="text-[10px] font-mono font-bold uppercase text-amber-300">💀 Fallen Mobs Ready to Loot (${deadMobs.length})</span>
+              ${deadMobs.length > 1 ? `<button type="button" onclick="playerRequestLootMob('__ALL__')" class="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px]">💰 Loot All</button>` : ''}
+            </div>
+            <div class="flex flex-wrap gap-1">
+              ${deadMobs.map(m => `<button type="button" onclick="playerRequestLootMob('${m.id}')" class="px-2 py-1 rounded-lg bg-dungeon-950 hover:bg-amber-500/20 border border-amber-500/40 text-amber-200 font-bold text-[10px] transition">💰 Loot ${escapeHtmlAttr(m.name)}${(Number(m.swarmCount) || 1) > 1 ? ` (×${m.swarmCount})` : ''}</button>`).join('')}
+            </div>
+          </div>
+        `;
+      })()}
+
+      <div class="space-y-1">
+        <div class="text-[9.5px] font-mono uppercase text-slate-400 font-bold">⚡ Quick Add Common Dungeon Gear</div>
+        <div class="flex flex-wrap gap-1">
+          ${DCC_QUICK_ITEMS_LIBRARY.map((it, idx) => `
+            <button type="button" onclick="playerAddQuickItem(${idx})" class="px-2 py-1 rounded-lg bg-dungeon-950 hover:bg-slate-800 border border-slate-700 text-[10px] text-slate-200 font-semibold transition">
+              + ${it.icon} ${escapeHtmlAttr(it.name)}
+            </button>
+          `).join('')}
+        </div>
+      </div>
+
+      <form onsubmit="playerAddCustomInventoryItem(event)" class="bg-dungeon-950 border border-slate-800 rounded-xl p-2 space-y-1.5 text-[10px]">
+        <div class="font-mono font-bold uppercase text-cyan-300 text-[9.5px]">➕ Add Custom Item to Inventory</div>
+        <div class="flex gap-1">
+          <select id="pInvCustomIcon" class="bg-dungeon-900 border border-slate-700 rounded px-1 py-1 text-xs">
+            <option value="🧪">🧪</option><option value="❤️">❤️</option><option value="💧">💧</option><option value="🔥">🔥</option><option value="🧨">🧨</option><option value="🗡️">🗡️</option><option value="🛡️">🛡️</option><option value="📜">📜</option><option value="🔑">🔑</option><option value="🎒">🎒</option>
+          </select>
+          <input id="pInvCustomName" type="text" required placeholder="Item name (e.g. Goblin Dynamite)..." class="flex-1 min-w-0 bg-dungeon-900 border border-slate-700 rounded px-2 py-1 text-slate-100" />
+          <input id="pInvCustomQty" type="number" value="1" min="1" max="999" class="w-12 bg-dungeon-900 border border-slate-700 rounded px-1 py-1 text-center font-mono text-slate-100" />
+        </div>
+        <div class="flex gap-1">
+          <select id="pInvCustomCat" class="bg-dungeon-900 border border-slate-700 rounded px-1.5 py-1 text-slate-200">
+            <option value="Consumable">Consumable</option>
+            <option value="Explosive">Explosive</option>
+            <option value="Weapon">Weapon</option>
+            <option value="Utility">Utility</option>
+            <option value="Quest / Misc">Quest / Misc</option>
+          </select>
+          <input id="pInvCustomNotes" type="text" placeholder="Effect / notes (optional)..." class="flex-1 min-w-0 bg-dungeon-900 border border-slate-700 rounded px-2 py-1 text-slate-200" />
+          <button type="submit" class="px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold shrink-0">Add</button>
+        </div>
+      </form>
+
+      <div class="flex items-center gap-1 overflow-x-auto pb-0.5">
+        ${['All', 'Loot Box', 'Consumable', 'Explosive', 'Weapon', 'Gear', 'Utility'].map(c => `
+          <button type="button" onclick="uiState.playerItemCategory='${c}'; renderPlayerControlDeck()" class="px-2 py-1 rounded-lg text-[10px] font-bold shrink-0 ${cat === c ? 'bg-cyan-500 text-slate-950' : 'bg-dungeon-950 text-slate-300 border border-slate-800'}">${c}</button>
+        `).join('')}
+      </div>
+
+      <input id="playerItemsSearchInput" type="text" value="${escapeHtmlAttr(uiState.playerItemSearch || '')}" oninput="uiState.playerItemSearch=this.value; renderPlayerControlDeck()" placeholder="Search inventory..." class="w-full bg-dungeon-950 border border-slate-700 focus:border-emerald-400 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none" />
+
+      <div class="space-y-1.5">
+        ${filtered.length === 0
+          ? '<div class="text-xs text-slate-500 italic text-center py-4">Inventory is empty. Use Quick Add or the form above to stash items!</div>'
+          : filtered.map(it => {
+              if (it.isLootBox) {
+                return `
+                  <div class="bg-amber-950/30 border border-amber-400/60 rounded-xl p-2.5 space-y-1.5">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="min-w-0">
+                        <div class="font-bold text-xs text-amber-200 truncate">${it.icon || '🎁'} ${escapeHtmlAttr(it.name)}</div>
+                        <div class="text-[9.5px] font-mono text-amber-300/80">${escapeHtmlAttr(it.notes || 'Unopened Loot Box')}</div>
+                      </div>
+                      <button type="button" onclick="playerOpenLootBox('${it.id}')" class="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-[10px] shrink-0 shadow transition">
+                        🎁 Open Box
+                      </button>
+                    </div>
+                  </div>
+                `;
+              }
+              const hotIdx = slots.findIndex(s => s && s.type === 'item' && (s.invId === it.id || String(s.name || '').toLowerCase() === String(it.name || '').toLowerCase()));
+              return `
+                <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-2 space-y-1">
+                  <div class="flex items-center justify-between gap-1.5">
+                    <div class="min-w-0">
+                      <div class="font-bold text-[11px] text-slate-100 truncate">${it.icon || '🎒'} ${escapeHtmlAttr(it.name)}</div>
+                      <div class="text-[9.5px] font-mono text-slate-400">${escapeHtmlAttr(it.category || 'Utility')}${it.notes ? ` • ${escapeHtmlAttr(it.notes)}` : ''}</div>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0 font-mono text-[10px]">
+                      <button type="button" onclick="bindInventoryItemToHotlist('${it.id}')" class="px-1.5 py-0.5 rounded border text-[9px] font-bold transition ${hotIdx !== -1 ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200' : 'bg-slate-900 border-slate-700 text-slate-300 hover:border-cyan-400'}">${hotIdx !== -1 ? `⚡ #${hotIdx + 1}` : '+ Hotlist'}</button>
+                      <button type="button" onclick="adjustCrawlerInventoryQty('${tok.id}', '${it.id}', -1)" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 font-bold">-</button>
+                      <span class="text-emerald-300 font-bold px-0.5">×${it.qty || 1}</span>
+                      <button type="button" onclick="adjustCrawlerInventoryQty('${tok.id}', '${it.id}', 1)" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 font-bold">+</button>
+                      <button type="button" onclick="removeCrawlerInventoryItem('${tok.id}', '${it.id}')" class="text-rose-400 hover:text-rose-300 font-bold pl-0.5">✕</button>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join('')
+        }
+      </div>
+    `;
+
+    if (activeElId === 'playerItemsSearchInput') {
+      const inp = document.getElementById('playerItemsSearchInput');
+      if (inp) {
+        inp.focus();
+        if (typeof selPos === 'number') inp.setSelectionRange(selPos, selPos);
+      }
+    }
+    return;
+  }
+
+function renderPaperDollSlotNodeHtml(tok, eqMap, slotId, shortTitle, badgeIcon, accentCls = 'cyan') {
+  const occ = (eqMap[slotId] || [])[0] || null;
+  const activeBorder = occ
+    ? (accentCls === 'amber' ? 'border-amber-400/80 bg-amber-950/35 text-amber-100' : 'border-cyan-400/80 bg-cyan-950/35 text-cyan-100')
+    : 'border-slate-800 bg-dungeon-900/85 text-slate-500 hover:border-slate-600';
+  return `
+    <div class="rounded-xl border ${activeBorder} p-1.5 flex flex-col justify-between min-h-[58px] transition">
+      <div class="flex items-center justify-between gap-1 text-[8.5px] font-mono uppercase tracking-wider text-slate-400">
+        <span>${badgeIcon} ${escapeHtmlAttr(shortTitle)}</span>
+        ${occ ? `<button type="button" onclick="toggleEquipCrawlerItem('${occ.id}')" title="Unequip ${escapeHtmlAttr(occ.name)}" class="text-rose-400 hover:text-rose-200 font-bold leading-none">✕</button>` : ''}
+      </div>
+      ${occ
+        ? `<div class="text-[9.5px] font-bold truncate leading-tight mt-0.5" title="${escapeHtmlAttr(occ.name)}">${occ.icon || '🛡️'} ${escapeHtmlAttr(occ.name)}</div>`
+        : `<div class="text-[9px] italic text-slate-600 mt-0.5">Empty</div>`
+      }
+    </div>
+  `;
+}
+
+function renderCrawlerGearSlotsCardHtml(tok) {
+  const eqMap = getCrawlerEquippedMap(tok);
+  const eqBonuses = getEquippedGearBonuses(tok);
+  const inv = getCrawlerInventory(tok);
+  const equippableItems = inv.filter(i => !i.isLootBox && inferItemGearSlot(i) !== null);
+  const bonusSummary = [];
+  if (eqBonuses.dr > 0) bonusSummary.push(`+${eqBonuses.dr} DR`);
+  if (eqBonuses.evade > 0) bonusSummary.push(`+${eqBonuses.evade} Evade`);
+  if (eqBonuses.moveFt > 0) bonusSummary.push(`+${eqBonuses.moveFt}ft Move`);
+  ['Str', 'Int', 'Con', 'Dex', 'Cha'].forEach(k => {
+    if (eqBonuses.stats[k] > 0) bonusSummary.push(`+${eqBonuses.stats[k]} ${k}`);
+  });
+
+  const accItems = eqMap.Accessories || [];
+  const hasBelt = accItems.some(a => /\bbelt\b/i.test(`${a.name || ''} ${a.notes || ''}`));
+  const hasCape = accItems.some(a => /\b(cape|cloak)\b/i.test(`${a.name || ''} ${a.notes || ''}`));
+  const hasPortrait = Boolean(typeof getResolvedTokenPortraitImage === 'function' && getResolvedTokenPortraitImage(tok));
+  const dollSilhouette = /cat|persian|feline|canine|dog|wolf|animal|pet|beast/i.test(`${tok.classification || ''} ${tok.race || ''}`) ? '🐾' : '🧍';
+
+  return `
+    <div class="bg-dungeon-950 border border-cyan-500/40 rounded-xl p-2.5 space-y-2.5">
+      <div class="flex items-center justify-between gap-2 border-b border-slate-800 pb-1.5">
+        <span class="text-[10px] font-mono font-bold uppercase text-cyan-300">🧍 Gear Paper Doll</span>
+        <span class="text-[9.5px] font-mono text-emerald-300 truncate">${bonusSummary.length ? bonusSummary.join(' • ') : 'Only equipped gear grants bonuses'}</span>
+      </div>
+
+      <!-- Visual Paper Doll Silhouette + Anatomical Slot Layout -->
+      <div class="bg-dungeon-900/60 border border-slate-800/90 rounded-xl p-2 space-y-2">
+        <div class="grid grid-cols-3 gap-1.5 items-center">
+          <div class="text-[8.5px] font-mono text-slate-500 px-1 leading-tight">1 item/slot<br/>(Accessories: 10)</div>
+          ${renderPaperDollSlotNodeHtml(tok, eqMap, 'Head', 'Head', '🪖', 'cyan')}
+          <div class="text-[8.5px] font-mono text-right text-slate-500 px-1 leading-tight">Max 1 Belt<br/>&amp; 1 Cape</div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-1.5 items-center">
+          ${renderPaperDollSlotNodeHtml(tok, eqMap, 'Arms', 'Arms', '🦾', 'cyan')}
+          <div class="flex flex-col items-center justify-center py-2 px-1 rounded-xl bg-dungeon-950 border border-slate-800 relative">
+            <div class="w-11 h-11 rounded-full border-2 border-cyan-500/40 bg-dungeon-900 flex items-center justify-center overflow-hidden shadow-inner">
+              ${hasPortrait
+                ? `<img src="${escapeHtmlAttr(tok.portraitDataUrl || tok.portraitUrl || getResolvedTokenPortraitImage(tok)?.src || '')}" alt="${escapeHtmlAttr(tok.name)}" class="w-full h-full object-cover" />`
+                : `<span class="text-xl">${tok.iconSymbol || dollSilhouette}</span>`
+              }
+            </div>
+            <div class="text-[8.5px] font-mono font-bold text-slate-300 mt-1 truncate max-w-full">${escapeHtmlAttr(tok.name || 'Crawler')}</div>
+          </div>
+          ${renderPaperDollSlotNodeHtml(tok, eqMap, 'Torso', 'Torso', '🦺', 'cyan')}
+        </div>
+
+        <div class="grid grid-cols-3 gap-1.5 items-center">
+          ${renderPaperDollSlotNodeHtml(tok, eqMap, 'HoldingLeft', 'Hold L', '🛡️', 'amber')}
+          ${renderPaperDollSlotNodeHtml(tok, eqMap, 'Legs', 'Legs', '👖', 'cyan')}
+          ${renderPaperDollSlotNodeHtml(tok, eqMap, 'HoldingRight', 'Hold R', '⚔️', 'amber')}
+        </div>
+
+        <div class="grid grid-cols-2 gap-1.5">
+          ${renderPaperDollSlotNodeHtml(tok, eqMap, 'Hands', 'Gloves', '🧤', 'cyan')}
+          ${renderPaperDollSlotNodeHtml(tok, eqMap, 'Feet', 'Feet', '🥾', 'cyan')}
+        </div>
+
+        <div class="bg-dungeon-950 border border-amber-500/35 rounded-lg p-1.5 space-y-1">
+          <div class="flex items-center justify-between text-[9px] font-mono">
+            <span class="text-amber-300 font-bold">💍 Accessories (${accItems.length}/10)</span>
+            <span class="text-slate-400">Belt: ${hasBelt ? '✓' : '—'} • Cape: ${hasCape ? '✓' : '—'}</span>
+          </div>
+          ${accItems.length === 0
+            ? '<div class="text-slate-600 italic text-[9px] font-mono">No accessories equipped.</div>'
+            : `<div class="flex flex-wrap gap-1">
+                ${accItems.map(a => `
+                  <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-dungeon-900 border border-amber-500/40 text-amber-200 text-[9px] font-mono">
+                    ${a.icon || '💍'} ${escapeHtmlAttr(a.name)}
+                    <button type="button" onclick="toggleEquipCrawlerItem('${a.id}')" class="text-rose-400 hover:text-rose-200 font-bold">×</button>
+                  </span>
+                `).join('')}
+              </div>`
+          }
+        </div>
+      </div>
+
+      ${equippableItems.length > 0 ? `
+        <div class="pt-1 border-t border-slate-800/80 space-y-1">
+          <div class="text-[9px] font-mono uppercase text-slate-400">Click to Equip / Unequip Inventory Gear</div>
+          <div class="flex flex-wrap gap-1">
+            ${equippableItems.map(it => `
+              <button type="button" onclick="toggleEquipCrawlerItem('${it.id}')" class="px-2 py-0.5 rounded-lg border text-[9.5px] font-mono transition ${it.equipped ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200 font-bold' : 'bg-dungeon-900 border-slate-700 text-slate-300 hover:border-cyan-400'}">
+                ${it.equipped ? '✓ ' : '+ '}${escapeHtmlAttr(it.name)}
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+
+  // TAB 5: CHARACTER SHEET & GEAR
   if (uiState.activePlayerDeckTab === 'sheet') {
     const noteParts = String(tok.notes || '').split(' || ').map(s => s.trim()).filter(Boolean);
     body.innerHTML = `
       ${headerCard}
+      ${(Number(tok.unspentStatPoints) || 0) > 0 ? `
+        <div class="bg-amber-950/35 border border-amber-400/60 rounded-xl p-2.5 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-mono font-bold uppercase text-amber-300">⭐ Unspent Stat Points: ${tok.unspentStatPoints}</span>
+            <span class="text-[9.5px] font-mono text-amber-200/80">Assign in Saferoom</span>
+          </div>
+          <div class="grid grid-cols-5 gap-1">
+            ${['Str', 'Int', 'Con', 'Dex', 'Cha'].map(k => `
+              <button type="button" onclick="playerSpendStatPoint('${k}')" class="py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-extrabold text-[10px] transition">+1 ${k}</button>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
       <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-2.5 space-y-2">
-        <div class="text-[10px] font-mono font-bold uppercase text-cyan-400">📊 Core Attributes</div>
+        <div class="flex items-center justify-between">
+          <span class="text-[10px] font-mono font-bold uppercase text-cyan-400">📊 Core Attributes</span>
+          <span class="text-[9.5px] font-mono text-slate-400">Grind: ${tok.levelGrindHours || 0}/${tok.level || 1}h</span>
+        </div>
         <div class="grid grid-cols-5 gap-1 text-center font-mono">
           ${['Str', 'Int', 'Con', 'Dex', 'Cha'].map(k => `
             <div class="bg-dungeon-900 border border-slate-800 rounded-lg p-1.5">
@@ -3572,8 +5300,9 @@ function renderPlayerControlDeck() {
         </div>
       </div>
 
+      ${renderCrawlerGearSlotsCardHtml(tok)}
       <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-2.5 space-y-1.5">
-        <div class="text-[10px] font-mono font-bold uppercase text-amber-400">🎒 Hotlist, Backstory & Gear</div>
+        <div class="text-[10px] font-mono font-bold uppercase text-amber-400">🎒 Backstory, Trauma & Starting Gear</div>
         ${noteParts.length === 0
           ? '<div class="text-[11px] text-slate-500 italic">No notes or gear recorded yet.</div>'
           : noteParts.map(line => `<div class="bg-dungeon-900 border border-slate-800/80 rounded-lg px-2 py-1.5 text-[11px] text-slate-200 leading-snug">${escapeHtmlAttr(line)}</div>`).join('')
@@ -3583,66 +5312,146 @@ function renderPlayerControlDeck() {
     return;
   }
 
-  // Default tab: Combat & Actions
-  const activeSkills = skills.filter(s => !analyzeAbilityEffects(tok, 'skill', s.id, s.rank || 1).isPurePassive);
-  const passiveSkills = skills.filter(s => analyzeAbilityEffects(tok, 'skill', s.id, s.rank || 1).isPurePassive);
-  const learnedIds = new Set(skills.map(s => s.id));
-  const pinnedUntrained = (uiState.pinnedUntrainedSkillIds || [])
-    .filter(id => !learnedIds.has(id))
-    .map(id => (appState?.skills || []).find(s => s.id === id))
-    .filter(Boolean);
+  // TAB 1 (DEFAULT): CLEAN VITALS + 10-BUTTON HOTLIST BAR (ZERO CLUTTER)
+  const slots = getOrBuildCrawlerHotlist(tok);
+  const usedCount = slots.filter(Boolean).length;
+  // Auto-select first filled slot if activeHotlistSlotIdx points to an empty slot and picker isn't open
+  if (uiState.hotlistAssignSlotIdx === null && (uiState.activeHotlistSlotIdx === null || !slots[uiState.activeHotlistSlotIdx])) {
+    const firstFilled = slots.findIndex(Boolean);
+    uiState.activeHotlistSlotIdx = firstFilled !== -1 ? firstFilled : null;
+  }
+
+  const hotbarGridHtml = slots.map((slot, idx) => {
+    const disp = resolveHotlistSlotDisplay(tok, slot);
+    const isSelected = uiState.activeHotlistSlotIdx === idx || uiState.hotlistAssignSlotIdx === idx;
+    if (!disp) {
+      return `
+        <button type="button" onclick="selectHotlistSlot(${idx})" class="h-12 rounded-xl border border-dashed flex flex-col items-center justify-center transition ${isSelected ? 'border-amber-400 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-dungeon-950/60 text-slate-600 hover:border-slate-600 hover:text-slate-400'}">
+          <span class="text-[9px] font-mono font-bold">#${idx + 1}</span>
+          <span class="text-[9px]">+ Empty</span>
+        </button>
+      `;
+    }
+    return `
+      <button type="button" onclick="selectHotlistSlot(${idx})" title="Slot #${idx + 1}: ${escapeHtmlAttr(disp.name)}" class="h-12 px-1.5 rounded-xl border flex flex-col justify-between py-1 text-left transition overflow-hidden ${isSelected ? 'border-cyan-400 bg-cyan-500/20 shadow-md shadow-cyan-500/10' : 'border-slate-800 bg-dungeon-950 hover:border-slate-600'}">
+        <div class="flex items-center justify-between w-full gap-0.5">
+          <span class="text-[9px] font-mono text-slate-500 font-bold">${idx + 1}</span>
+          <span class="text-[9px] font-mono font-bold ${disp.badgeCls} truncate">${disp.badge}</span>
+        </div>
+        <div class="text-[10px] font-bold text-slate-100 truncate w-full leading-tight">${disp.icon} ${escapeHtmlAttr(disp.name)}</div>
+      </button>
+    `;
+  }).join('');
 
   body.innerHTML = `
     ${headerCard}
+    ${targetedHudHtml}
 
     <div class="grid grid-cols-3 gap-1.5 text-center font-mono text-[10px]">
       <div class="bg-dungeon-950 border border-slate-800 rounded-lg p-1.5"><div class="text-[9px] text-slate-500">EVADE</div><div class="font-bold text-cyan-300">${effectiveEvade}</div></div>
       <div class="bg-dungeon-950 border border-slate-800 rounded-lg p-1.5"><div class="text-[9px] text-slate-500">MOVE</div><div class="font-bold text-emerald-300">${tok.move || '20+S'}</div></div>
       <div class="bg-dungeon-950 border border-slate-800 rounded-lg p-1.5"><div class="text-[9px] text-slate-500">DR</div><div class="font-bold text-amber-300">${getEffectiveTokenDr(tok)}</div></div>
     </div>
+          ${(appState?.round || 0) === 0 && isExplorationModeActive() ? `
+            <div class="bg-cyan-950/35 border border-cyan-500/40 rounded-lg p-1.5 space-y-1.5">
+              <div class="flex items-center justify-between gap-1">
+                <span class="text-[9px] font-mono uppercase font-bold text-cyan-300">🧭 Exploration &amp; Social RP</span>
+                <span class="text-[8.5px] font-mono text-slate-400">Shared Roll Banner</span>
+              </div>
+              <div class="grid grid-cols-3 gap-1">
+                <button type="button" onclick="triggerCrawlerExplorationAction('${tok.id}', 'search')" class="py-1 px-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-500/40 text-cyan-200 font-bold text-[9.5px] transition">🔍 Search</button>
+                <button type="button" onclick="triggerCrawlerExplorationAction('${tok.id}', 'interact')" class="py-1 px-1.5 rounded bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-500/40 text-emerald-200 font-bold text-[9.5px] transition">🤲 Interact</button>
+                <button type="button" onclick="triggerCrawlerExplorationAction('${tok.id}', 'sneak')" class="py-1 px-1.5 rounded bg-indigo-500/20 hover:bg-indigo-500/35 border border-indigo-500/40 text-indigo-200 font-bold text-[9.5px] transition">🥷 Sneak</button>
+              </div>
+              <div class="grid grid-cols-2 gap-1 pt-0.5 border-t border-cyan-500/20">
+                <button type="button" onclick="triggerCrawlerExplorationAction('${tok.id}', 'first_impression')" class="py-1 px-1.5 rounded bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 font-bold text-[9px] transition truncate">🤝 First Impression</button>
+                <button type="button" onclick="triggerCrawlerExplorationAction('${tok.id}', 'animal_handling')" class="py-1 px-1.5 rounded bg-emerald-500/15 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-200 font-bold text-[9px] transition truncate">🐾 Animal Handle</button>
+                <button type="button" onclick="triggerCrawlerExplorationAction('${tok.id}', 'parley')" class="py-1 px-1.5 rounded bg-sky-500/15 hover:bg-sky-500/30 border border-sky-500/40 text-sky-200 font-bold text-[9px] transition truncate">💬 Parley / Social</button>
+                <button type="button" onclick="triggerCrawlerExplorationAction('${tok.id}', 'pickpocket')" class="py-1 px-1.5 rounded bg-purple-500/15 hover:bg-purple-500/30 border border-purple-500/40 text-purple-200 font-bold text-[9px] transition truncate">🤏 Sleight / Pocket</button>
+              </div>
+              <button type="button" onclick="triggerCrawlerExplorationAction('${tok.id}', 'lore')" class="w-full py-1 px-1.5 rounded bg-slate-800/90 hover:bg-slate-700 border border-slate-600 text-amber-200 font-bold text-[9px] transition">📜 Lore Check (Area &amp; Mob Intel)</button>
+            </div>
+          ` : ''}
+    <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-2 space-y-1.5">
+      <div class="flex items-center justify-between gap-1 text-[10px] font-mono">
+        <span class="text-slate-400 font-bold">🎲 Roll Mode:</span>
+        <div class="flex items-center gap-1">
+          <button type="button" onclick="setCombatRollMode('adv')" class="px-2 py-0.5 rounded font-bold ${uiState.combatRollMode === 'adv' ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-300'}">🟢 Adv</button>
+          <button type="button" onclick="setCombatRollMode('normal')" class="px-2 py-0.5 rounded font-bold ${uiState.combatRollMode === 'normal' ? 'bg-slate-200 text-slate-950' : 'bg-slate-800 text-slate-300'}">Norm</button>
+          <button type="button" onclick="setCombatRollMode('disadv')" class="px-2 py-0.5 rounded font-bold ${uiState.combatRollMode === 'disadv' ? 'bg-rose-500 text-slate-950' : 'bg-slate-800 text-slate-300'}">🔴 Dis</button>
+        </div>
+      </div>
+      ${(() => {
+        const pPerm = getCrawlerPhasePermissions(tok);
+        const bannerHtml = pPerm.bannerText
+          ? `<div class="text-[10px] font-mono font-bold px-2 py-1 rounded-lg border ${pPerm.bannerTone === 'emerald' ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300' : pPerm.bannerTone === 'amber' ? 'bg-amber-950/45 border-amber-400/60 text-amber-200' : 'bg-rose-950/45 border-rose-500/50 text-rose-200'}">${pPerm.bannerText}</div>`
+          : '';
+        const intDisabled = pPerm.locked;
+        const playDisabled = !pPerm.canActFull;
+        return `
+          ${bannerHtml}
+          <div class="grid grid-cols-2 gap-1.5">
+            <button type="button" ${intDisabled ? 'disabled' : ''} onclick="triggerCrawlerSupportAction('${tok.id}', 'intervene')" class="py-1 px-2 rounded-lg font-bold text-[10px] transition ${intDisabled ? 'bg-slate-800 border border-slate-700 text-slate-500 cursor-not-allowed' : 'bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-500/40 text-cyan-200'}">🤝 Intervene (1d6)</button>
+            <button type="button" ${playDisabled ? 'disabled' : ''} onclick="triggerCrawlerSupportAction('${tok.id}', 'call_play')" class="py-1 px-2 rounded-lg font-bold text-[10px] transition ${playDisabled ? 'bg-slate-800 border border-slate-700 text-slate-500 cursor-not-allowed' : 'bg-amber-500/20 hover:bg-amber-500/35 border border-amber-500/40 text-amber-200'}">📣 Call a Play (2d6)</button>
+          </div>
+          ${(() => {
+            const adj = typeof getAdjacentDoorsForToken === 'function' ? getAdjacentDoorsForToken(tok, getActiveScene()) : [];
+            const doorDisabled = !pPerm.canActFull || adj.length === 0;
+            const nextState = adj[0]?.open ? 'Close Door' : 'Open Door';
+            return `<button type="button" ${doorDisabled ? 'disabled' : ''} onclick="triggerCrawlerDoorAction('${tok.id}')" class="w-full mt-1.5 py-1 px-2 rounded-lg font-bold text-[10px] transition ${doorDisabled ? 'bg-slate-800 border border-slate-700 text-slate-500 cursor-not-allowed' : 'bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-500/40 text-emerald-200'}">🚪 ${nextState} (1 Action${adj.length === 0 ? ' • Adjacent Only' : ''})</button>`;
+          })()}`;
+      })()}
+      ${tok.evadeAdvVsMobId ? `<div class="text-[9.5px] font-mono text-emerald-300">⚡ Counter-Advantage ready on next Attack!</div>` : ''}
+    </div>
 
     ${(buffs.length > 0 || statuses.length > 0) ? `
-      <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-2 space-y-1.5">
-        <div class="text-[10px] font-mono font-bold uppercase text-slate-400">✨ Active Buffs & Debuffs</div>
+      <div class="bg-dungeon-950 border border-slate-800 rounded-xl p-2 space-y-1">
+        <div class="text-[9.5px] font-mono font-bold uppercase text-slate-400">✨ Active Buffs & Debuffs</div>
         <div class="flex flex-wrap gap-1">
-          ${buffs.map(b => `<span onmouseenter="showEffectHoverInfo('buff', '${encodeURIComponent(String(b))}')" onmouseleave="hideEffectHoverInfo()" class="cursor-help px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 border border-emerald-500/40 text-emerald-200">${escapeHtmlAttr(String(b).replace(/^\[Passive\]\s*/i, ''))}</span>`).join('')}
+          ${buffs.map(b => `<span onmouseenter="showEffectHoverInfo('buff', '${encodeURIComponent(String(b))}')" onmouseleave="hideEffectHoverInfo()" class="cursor-help px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 border border-emerald-500/40 text-emerald-200">${escapeHtmlAttr(String(b).replace(/^\[(?:Passive|Aura)\]\s*/i, ''))}</span>`).join('')}
           ${statuses.map(s => `<span onmouseenter="showEffectHoverInfo('debuff', '${encodeURIComponent(String(s))}')" onmouseleave="hideEffectHoverInfo()" class="cursor-help px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/20 border border-rose-500/40 text-rose-200">${escapeHtmlAttr(s)}</span>`).join('')}
         </div>
       </div>
     ` : ''}
 
-    <div class="space-y-1.5">
-      <div class="text-[10px] font-mono font-bold uppercase text-indigo-300">✨ Spells (${spells.length})</div>
-      ${spells.length === 0
-        ? '<div class="text-[11px] text-slate-500 italic bg-dungeon-950 border border-slate-800 rounded-xl p-2">No spells learned yet.</div>'
-        : spells.map(sp => renderPlayerAbilityRowHtml(tok, 'spell', sp, scene)).join('')
-      }
-    </div>
+    ${(() => {
+      const deadMobs = typeof getDeadUnlootedMobsInScene === 'function' ? getDeadUnlootedMobsInScene(scene) : [];
+      const unopenedBoxes = getCrawlerInventory(tok).filter(i => i.isLootBox);
+      if (deadMobs.length === 0 && unopenedBoxes.length === 0) return '';
+      return `
+        <div class="space-y-1.5">
+          ${unopenedBoxes.length > 0 ? `
+            <div class="bg-amber-950/35 border border-amber-400/60 rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-2">
+              <span class="text-[10px] font-bold text-amber-200">🎁 ${unopenedBoxes.length} Unopened Loot ${unopenedBoxes.length === 1 ? 'Box' : 'Boxes'} in Inventory!</span>
+              <button type="button" onclick="setPlayerDeckTab('items')" class="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-[10px]">Open →</button>
+            </div>
+          ` : ''}
+          ${deadMobs.length > 0 ? `
+            <div class="bg-emerald-950/30 border border-emerald-500/45 rounded-xl p-2 space-y-1">
+              <div class="flex items-center justify-between">
+                <span class="text-[9.5px] font-mono font-bold uppercase text-emerald-300">💀 Dead Mobs to Loot (${deadMobs.length})</span>
+                ${deadMobs.length > 1 ? `<button type="button" onclick="playerRequestLootMob('__ALL__')" class="px-2 py-0.2 rounded bg-emerald-500 text-slate-950 font-bold text-[9.5px]">💰 Loot All</button>` : ''}
+              </div>
+              <div class="flex flex-wrap gap-1">
+                ${deadMobs.map(m => `<button type="button" onclick="playerRequestLootMob('${m.id}')" class="px-2 py-0.5 rounded-lg bg-dungeon-950 hover:bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 font-bold text-[10px] transition">💰 ${escapeHtmlAttr(m.name)}</button>`).join('')}
+              </div>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    })()}
 
-    <div class="space-y-1.5">
+    <div class="space-y-2">
       <div class="flex items-center justify-between">
-        <span class="text-[10px] font-mono font-bold uppercase text-amber-300">⚔️ Active Skills (${activeSkills.length})</span>
-        <button type="button" onclick="setPlayerDeckTab('skills')" class="text-[10px] text-cyan-300 hover:underline font-semibold">+ Try Untrained (R0) →</button>
+        <span class="text-[10px] font-mono font-bold uppercase text-cyan-300">⚡ 10-Slot Hotlist (${usedCount}/10)</span>
+        <button type="button" onclick="setPlayerDeckTab('learned')" class="text-[10px] text-amber-300 hover:underline font-semibold">📖 All Learned (${skills.length + spells.length}) →</button>
       </div>
-      ${activeSkills.length === 0
-        ? '<div class="text-[11px] text-slate-500 italic bg-dungeon-950 border border-slate-800 rounded-xl p-2">No active skills assigned yet.</div>'
-        : activeSkills.map(sk => renderPlayerAbilityRowHtml(tok, 'skill', sk, scene)).join('')
+      <div class="grid grid-cols-2 gap-1.5">${hotbarGridHtml}</div>
+      ${uiState.hotlistAssignSlotIdx !== null
+        ? renderHotlistAssignPickerHtml(tok, uiState.hotlistAssignSlotIdx)
+        : (uiState.activeHotlistSlotIdx !== null ? renderPlayerHotlistActiveSlotBarHtml(tok, scene, uiState.activeHotlistSlotIdx) : '')
       }
     </div>
-
-    ${pinnedUntrained.length > 0 ? `
-      <div class="space-y-1.5">
-        <div class="text-[10px] font-mono font-bold uppercase text-amber-400">🎲 Pinned Untrained Skills (Rank 0 • Disadvantage)</div>
-        ${pinnedUntrained.map(sk => renderPlayerUntrainedSkillRowHtml(tok, sk, scene, true)).join('')}
-      </div>
-    ` : ''}
-
-    ${passiveSkills.length > 0 ? `
-      <div class="space-y-1.5">
-        <div class="text-[10px] font-mono font-bold uppercase text-emerald-300">🔒 Passive Skills (${passiveSkills.length})</div>
-        ${passiveSkills.map(sk => renderPlayerAbilityRowHtml(tok, 'skill', sk, scene)).join('')}
-      </div>
-    ` : ''}
   `;
 }
 
@@ -3691,11 +5500,15 @@ function renderAllUI() {
   }
   syncGmPinSettingsUi();
   updatePlayerClaimButtonUi();
-  if (IS_PLAYER_WINDOW) renderPlayerControlDeck();
+  if (IS_PLAYER_WINDOW) {
+    renderPlayerControlDeck();
+    if (typeof renderPlayerGrindingSessionModal === 'function') renderPlayerGrindingSessionModal();
+  }
 }
 
 function initVttApplication() {
   loadStateFromStorage();
+  if (!IS_PLAYER_WINDOW && typeof syncCampaignNeighborhoodsIntoAppState === 'function') syncCampaignNeighborhoodsIntoAppState(false);
   if (IS_PLAYER_WINDOW) {
     const badge = document.getElementById('windowModeBadge');
     if (badge) badge.textContent = 'PLAYER DISPLAY';
@@ -3709,13 +5522,21 @@ function initVttApplication() {
     if (hostBtn) hostBtn.classList.add('hidden');
     const lockBtn = document.getElementById('lockGmScreenBtn');
     if (lockBtn) lockBtn.classList.add('hidden');
+    const qsBtn = document.getElementById('gmQuickSaveBtn');
+    if (qsBtn) qsBtn.classList.add('hidden');
+    const lbBtn = document.getElementById('gmLootBoxBtn');
+    if (lbBtn) lbBtn.classList.add('hidden');
+    const advBtn = document.getElementById('gmAdvancementBtn');
+    if (advBtn) advBtn.classList.add('hidden');
+    const campBtn = document.getElementById('gmCampaignBtn');
+    if (campBtn) campBtn.classList.add('hidden');
     const tools = document.getElementById('floatingMapTools');
     if (tools) tools.classList.add('hidden');
 
     // Make top-bar GM controls read-only / hidden for players while keeping status visible
     const hideIds = [
       'renameSceneBtn', 'deleteSceneBtn', 'decRoundBtn', 'incRoundBtn',
-      'nextPhaseBtn', 'editCollapseClockBtn', 'restButtonsGroup', 'toggleAutoApBtn'
+      'rollSurpriseBtn', 'nextPhaseBtn', 'editCollapseClockBtn', 'restButtonsGroup', 'toggleAutoApBtn', 'togglePhaseLockBtn', 'toggleMinimapBtn'
     ];
     hideIds.forEach(id => {
       const el = document.getElementById(id);
@@ -3752,6 +5573,7 @@ function initVttApplication() {
   } else {
     const lockBtn = document.getElementById('lockGmScreenBtn');
     if (lockBtn) lockBtn.classList.remove('hidden');
+    if (typeof refreshSaveStatesList === 'function') refreshSaveStatesList();
     if (!isGmScreenUnlocked()) {
       lockGmScreenNow();
     }
